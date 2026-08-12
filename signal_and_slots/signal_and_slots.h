@@ -1,17 +1,18 @@
 #pragma once
 
 /**
- * QTobserver — 轻量 Qt 风格信号/槽 + 事件循环（C++17 header-only）
+ * SignalAndSlots — 轻量 Qt 风格信号/槽 + 事件循环（C++17 header-only）
  *
  * 日常用法：
- *   #include "QTobserver.h"
+ *   #include "signal_and_slots.h"
  *   using namespace qto;
  *
  * 能力：
  *   - ConnectionType: Direct / Queued / Auto
  *   - Connection / ScopedConnection（可断开、RAII）
  *   - Object 析构自动断开入站连接，槽内校验存活，避免悬空
- *   - connect / emit 线程安全
+ *   - Object::deleteLater + object_uptr / object_sptr / object_wptr
+ *   - connect / emit 线程安全；connect 支持裸指针与智能指针（非拥有观察）
  *   - EventLoop：post / 延迟定时器 / 周期定时器 / processEvents
  *   - WorkerThread：一线程一循环
  *   - CoreApplication / ensure_thread_loop：每线程默认 EventLoop（仿 QThread 亲和）
@@ -21,9 +22,11 @@
  * 使用注意：
  *   1) 跨线程 Object 销毁前先 WorkerThread::stop() / 排空队列
  *   2) 派生类若可能被跨线程回调，析构函数第一行调用 invalidate()
+ *       （堆对象优先 object_uptr / deleteLater，可减少手动 invalidate）
  *   3) 跨线程 Direct 会自动降级为 Queued；Queued 且无 loop 则丢弃
  *   4) 禁止在工作线程里调用 WorkerThread::stop() 期望 join 自己
  *   5) 主线程建议先构造 CoreApplication（或依赖 Object 内 ensure_thread_loop）
+ *   6) 堆上 Object 建议只用 object_uptr/object_sptr 拥有；connect 仅观察不延长寿命
  */
 #include <algorithm>
 #include <atomic>
@@ -454,6 +457,23 @@ public:
         return loop_.load(std::memory_order_acquire);
     }
 
+    /// 预约删除（仅用于 new 出来的对象）。
+    /// - 目标 loop 正在泵，或调用方不在亲和线程：post 到目标 loop 再 delete
+    /// - 亲和线程且当前未在泵：立即 delete（避免无 exec 时泄漏）
+    void deleteLater() {
+        EventLoop* loop = thread(); //获取当前对象绑定的线程
+        if (!loop) { //如果当前对象没有绑定线程，则立即删除
+            delete this;
+            return;
+        }
+        //如果当前对象绑定的线程正在泵，或者调用方不在亲和线程，则将当前对象post到目标线程再删除
+        if (tls_running_loop == loop || current_thread_loop() != loop) {
+            loop->post([this] { delete this; });
+            return;
+        }
+        delete this;
+    }
+
     std::weak_ptr<void> lifetime() const { return alive_; }
     bool isValid() const noexcept {
         return valid_.load(std::memory_order_acquire);
@@ -483,6 +503,52 @@ private:
     mutable std::mutex inbound_mutex_;
     std::vector<std::shared_ptr<ConnectionState>> inbound_;
 };
+
+// =============================================================================
+// Object 智能指针：堆对象所有权约定（connect 仅观察，不因连接延长寿命）
+// =============================================================================
+struct ObjectDeleteLater {
+    void operator()(Object* p) const noexcept {
+        if (p) p->deleteLater();
+    }
+};
+
+template <typename T>
+using object_uptr = std::unique_ptr<T, ObjectDeleteLater>;
+
+template <typename T>
+using object_sptr = std::shared_ptr<T>;
+
+template <typename T>
+using object_wptr = std::weak_ptr<T>;
+
+template <typename T, typename... Args>
+object_uptr<T> make_object(Args&&... args) {
+    static_assert(std::is_base_of_v<Object, T>,
+                  "T must derive from qto::Object");
+    return object_uptr<T>(new T(std::forward<Args>(args)...));
+}
+
+template <typename T, typename... Args>
+object_sptr<T> make_object_shared(Args&&... args) {
+    static_assert(std::is_base_of_v<Object, T>,
+                  "T must derive from qto::Object");
+    return object_sptr<T>(new T(std::forward<Args>(args)...),
+                          ObjectDeleteLater{});
+}
+
+template <typename T>
+T* object_get(T* p) noexcept {
+    return p;
+}
+template <typename T, typename D>
+T* object_get(const std::unique_ptr<T, D>& p) noexcept {
+    return p.get();
+}
+template <typename T>
+T* object_get(const std::shared_ptr<T>& p) noexcept {
+    return p.get();
+}
 
 // =============================================================================
 // Signal
@@ -533,6 +599,67 @@ public:
                 (receiver->*method)(args...);
             },
             type);
+    }
+
+    /// 智能指针语法糖（非拥有：不因连接持有 shared 延长寿命）
+    template <typename Recv, typename D, typename SlotClass,
+              typename... SlotArgs>
+    Connection connect(const std::unique_ptr<Recv, D>& receiver,
+                       void (SlotClass::*method)(SlotArgs...),
+                       ConnectionType type = ConnectionType::Auto) {
+        return connect(receiver.get(), method, type);
+    }
+    template <typename Recv, typename D, typename SlotClass,
+              typename... SlotArgs>
+    Connection connect(const std::unique_ptr<Recv, D>& receiver,
+                       void (SlotClass::*method)(SlotArgs...) const,
+                       ConnectionType type = ConnectionType::Auto) {
+        return connect(receiver.get(), method, type);
+    }
+    template <typename Recv, typename SlotClass, typename... SlotArgs>
+    Connection connect(const std::shared_ptr<Recv>& receiver,
+                       void (SlotClass::*method)(SlotArgs...),
+                       ConnectionType type = ConnectionType::Auto) {
+        return connect(receiver.get(), method, type);
+    }
+    template <typename Recv, typename SlotClass, typename... SlotArgs>
+    Connection connect(const std::shared_ptr<Recv>& receiver,
+                       void (SlotClass::*method)(SlotArgs...) const,
+                       ConnectionType type = ConnectionType::Auto) {
+        return connect(receiver.get(), method, type);
+    }
+    template <typename Recv, typename SlotClass, typename... SlotArgs>
+    Connection connect(const std::weak_ptr<Recv>& receiver,
+                       void (SlotClass::*method)(SlotArgs...),
+                       ConnectionType type = ConnectionType::Auto) {
+        auto locked = receiver.lock();
+        return connect(locked.get(), method, type);
+    }
+    template <typename Recv, typename SlotClass, typename... SlotArgs>
+    Connection connect(const std::weak_ptr<Recv>& receiver,
+                       void (SlotClass::*method)(SlotArgs...) const,
+                       ConnectionType type = ConnectionType::Auto) {
+        auto locked = receiver.lock();
+        return connect(locked.get(), method, type);
+    }
+    template <typename Recv, typename D>
+    Connection connect(const std::unique_ptr<Recv, D>& receiver, Slot slot,
+                       ConnectionType type = ConnectionType::Auto) {
+        return connect(static_cast<Object*>(receiver.get()), std::move(slot),
+                       type);
+    }
+    template <typename Recv>
+    Connection connect(const std::shared_ptr<Recv>& receiver, Slot slot,
+                       ConnectionType type = ConnectionType::Auto) {
+        return connect(static_cast<Object*>(receiver.get()), std::move(slot),
+                       type);
+    }
+    template <typename Recv>
+    Connection connect(const std::weak_ptr<Recv>& receiver, Slot slot,
+                       ConnectionType type = ConnectionType::Auto) {
+        auto locked = receiver.lock();
+        return connect(static_cast<Object*>(locked.get()), std::move(slot),
+                       type);
     }
 
     /// 无 receiver：始终在 emit 线程 Direct 调用（注意捕获对象生命周期）
@@ -625,8 +752,8 @@ public:
 private:
     struct Entry {
         std::shared_ptr<ConnectionState> state;
-        Object* receiver = nullptr;
-        std::weak_ptr<void> receiver_alive;
+        Object* receiver = nullptr; //接收信号的object对象
+        std::weak_ptr<void> receiver_alive; //接收信号的object对象是否存活
         Slot slot;
         ConnectionType type = ConnectionType::Auto;
     };
@@ -669,7 +796,7 @@ private:
     }
 
     mutable std::mutex mutex_;
-    std::vector<Entry> entries_;
+    std::vector<Entry> entries_; //这个信号有多少槽函数连接
     std::uint64_t next_id_ = 1;
     // 无 receiver 连接的存活哨兵
     std::shared_ptr<void> forever_ = std::make_shared<char>('\0');
@@ -709,6 +836,23 @@ inline void invoke(Object* receiver, std::function<void()> fn,
     });
 }
 
+template <typename T, typename D>
+void invoke(const std::unique_ptr<T, D>& receiver, std::function<void()> fn,
+            ConnectionType type = ConnectionType::Auto) {
+    invoke(static_cast<Object*>(receiver.get()), std::move(fn), type);
+}
+template <typename T>
+void invoke(const std::shared_ptr<T>& receiver, std::function<void()> fn,
+            ConnectionType type = ConnectionType::Auto) {
+    invoke(static_cast<Object*>(receiver.get()), std::move(fn), type);
+}
+template <typename T>
+void invoke(const std::weak_ptr<T>& receiver, std::function<void()> fn,
+            ConnectionType type = ConnectionType::Auto) {
+    auto locked = receiver.lock();
+    invoke(static_cast<Object*>(locked.get()), std::move(fn), type);
+}
+
 // =============================================================================
 // 自由函数 connect
 // =============================================================================
@@ -730,6 +874,74 @@ Connection connect(Signal<Args...>& signal, Recv* receiver,
 
 template <typename... Args>
 Connection connect(Signal<Args...>& signal, Object* receiver,
+                   typename Signal<Args...>::Slot slot,
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, std::move(slot), type);
+}
+
+template <typename... Args, typename Recv, typename D, typename SlotClass,
+          typename... SlotArgs>
+Connection connect(Signal<Args...>& signal,
+                   const std::unique_ptr<Recv, D>& receiver,
+                   void (SlotClass::*method)(SlotArgs...),
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, method, type);
+}
+template <typename... Args, typename Recv, typename D, typename SlotClass,
+          typename... SlotArgs>
+Connection connect(Signal<Args...>& signal,
+                   const std::unique_ptr<Recv, D>& receiver,
+                   void (SlotClass::*method)(SlotArgs...) const,
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, method, type);
+}
+template <typename... Args, typename Recv, typename SlotClass,
+          typename... SlotArgs>
+Connection connect(Signal<Args...>& signal,
+                   const std::shared_ptr<Recv>& receiver,
+                   void (SlotClass::*method)(SlotArgs...),
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, method, type);
+}
+template <typename... Args, typename Recv, typename SlotClass,
+          typename... SlotArgs>
+Connection connect(Signal<Args...>& signal,
+                   const std::shared_ptr<Recv>& receiver,
+                   void (SlotClass::*method)(SlotArgs...) const,
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, method, type);
+}
+template <typename... Args, typename Recv, typename SlotClass,
+          typename... SlotArgs>
+Connection connect(Signal<Args...>& signal, const std::weak_ptr<Recv>& receiver,
+                   void (SlotClass::*method)(SlotArgs...),
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, method, type);
+}
+template <typename... Args, typename Recv, typename SlotClass,
+          typename... SlotArgs>
+Connection connect(Signal<Args...>& signal, const std::weak_ptr<Recv>& receiver,
+                   void (SlotClass::*method)(SlotArgs...) const,
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, method, type);
+}
+
+template <typename... Args, typename Recv, typename D>
+Connection connect(Signal<Args...>& signal,
+                   const std::unique_ptr<Recv, D>& receiver,
+                   typename Signal<Args...>::Slot slot,
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, std::move(slot), type);
+}
+template <typename... Args, typename Recv>
+Connection connect(Signal<Args...>& signal,
+                   const std::shared_ptr<Recv>& receiver,
+                   typename Signal<Args...>::Slot slot,
+                   ConnectionType type = ConnectionType::Auto) {
+    return signal.connect(receiver, std::move(slot), type);
+}
+template <typename... Args, typename Recv>
+Connection connect(Signal<Args...>& signal, const std::weak_ptr<Recv>& receiver,
                    typename Signal<Args...>::Slot slot,
                    ConnectionType type = ConnectionType::Auto) {
     return signal.connect(receiver, std::move(slot), type);

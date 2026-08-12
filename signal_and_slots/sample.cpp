@@ -3,7 +3,7 @@
  * 编译: g++ -std=c++17 -O2 -pthread -o QTobserver.exe QTobserver.cpp
  */
 
-#include "QTobserver.h"
+#include "signal_and_slots.h"
 
 #include <atomic>
 #include <chrono>
