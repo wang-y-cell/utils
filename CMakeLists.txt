@@ -29,3 +29,6 @@ target_include_directories(signal_sample PRIVATE
 if(UNIX)
   target_link_libraries(signal_sample PRIVATE pthread)
 endif()
+
+add_executable(expected_demo result/expected_demo.cpp)
+target_include_directories(expected_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -3,13 +3,16 @@
 /**
  * Expected<T, E> / Result<T> — 错误传递，少用异常当控制流（C++20 header-only）
  *
- * 日常用法：
- *   #include "result/expected.h"
+ * 详细可运行教程：result/expected_demo.cpp
+ *   cmake --build build --target expected_demo
  *
- *   utils::Result<int> parse(...);
- *   auto r = parse().and_then([](int n) -> utils::Result<int> {
- *       return n > 0 ? utils::result_ok(n) : utils::result_err(std::errc::invalid_argument);
- *   });
+ * 速览：
+ *   Result<int> r = result_ok(42);
+ *   if (!r) { use(r.error()); } else { use(*r); }
+ *   auto x = parse().and_then([](int n) -> Result<int> { return result_ok(n * 2); });
+ *
+ * 业务失败请 return result_err / unexpected，不要用异常当控制流。
+ * value() 在无值时抛 BadExpectedAccess，仅作未检查访问的兜底。
  */
 
 #include <cassert>
