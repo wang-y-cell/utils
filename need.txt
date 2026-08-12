@@ -1,0 +1,81 @@
+你现在的方向很对：`signal_and_slots`（跨线程通信/事件循环）和 `thread_pool`（执行器）都是典型的**基础设施胶水**，而不是业务模块。
+
+下面按「几乎每个项目都会碰到、但不绑定具体算法/业务」来推荐，并标优先级。
+
+---
+
+### 优先做（高频、和现有组件互补）
+
+| 模块 | 解决什么 | 为何是胶水 |
+|------|----------|------------|
+| **Result / Expected** | 错误传递，少用异常当控制流 | 对接任何库的返回值，不绑定错误类型协议 |
+| **ScopeGuard / defer** | RAII 收尾（关 fd、解锁、回滚标志） | 一行包装任意清理逻辑 |
+| **any_invocable / function_ref** | 类型擦除回调、非拥有观察 | 给第三方回调“插线”，比 `std::function` 更可控 |
+| **span / string_view 工具层**（若 C++20 已有则薄封装） | 统一缓冲区/字符串视图边界 | 对接 ASIO、OpenCV、自研 buffer 都不拥有数据 |
+| **Executor 抽象** | `post(f)` 接口，背后可接 thread_pool / EventLoop / asio | 业务只依赖接口，运行时再绑实现 |
+
+你已有 `EventLoop` + `thread_pool`，再抽一层很薄的 `Executor`，以后换调度器不用改业务。
+
+---
+
+### 第二批（项目一大就很痛）
+
+| 模块 | 说明 |
+|------|------|
+| **Channel / MPSC 队列** | 线程间传消息的“管道”；信号槽偏回调，Channel 偏数据流 |
+| **CancellationToken** | 可协作取消；线程池任务、网络读、定时器共用同一取消语义 |
+| **StopWatch / Deadline** | 超时、截止时间；配合 I/O、等待、重试 |
+| **Retry / Backoff 策略对象** | 只描述“怎么重试”，真正的 RPC/文件操作由调用方提供 |
+| **Config 视图** | 从 JSON/TOML/环境变量读成 `get<T>(key)`，不绑具体解析库（可适配 nlohmann / yaml-cpp） |
+| **Logging facade** | `log::info(...)` 宏或接口，后端可接 spdlog / 自己写；业务零耦合 |
+
+---
+
+### 第三批（按你做的项目类型选）
+
+- **做桌面/工具**：`Property`（带变更通知，可挂到 Signal）、`Command`/`UndoStack`、简易 `PluginLoader`（动态库符号解析的薄封装）
+- **做服务/网络**：`Buffer`（可读可写游标，不拥有或可选拥有）、`AsyncScope`（结构化并发：一组任务一起取消/等待）
+- **做游戏/实时**：`FrameArena` / 帧分配器、`JobSystem` 与现有 thread_pool 的依赖图调度（仍偏胶水：只调度，不算力）
+- **跨模块状态**：`ServiceLocator` 或更好的 **Context/Registry**（显式注入，避免全局单例地狱）
+
+---
+
+### 建议刻意不做（容易做成“功能模块”而非胶水）
+
+- 具体编解码、加密、图像算法、协议实现  
+- 完整 HTTP/WebSocket 客户端（用 ASIO/第三方，你只做适配器）  
+- ORM、完整 GUI 框架  
+
+原则：**你提供接口与生命周期，算法与协议留给第三方或业务。**
+
+---
+
+### 和你现有库的衔接建议
+
+你已经有一条很清晰的主干：
+
+```
+Object / Signal / EventLoop  ← 线程亲和与回调
+thread_pool                  ← 批量计算执行
+（缺）Executor 统一入口
+（缺）Cancellation + Channel ← 数据与取消语义
+（缺）Result + ScopeGuard    ← 错误与资源
+（缺）log / config facade    ← 可替换后端
+```
+
+推荐落地顺序：
+
+1. **Result + ScopeGuard**（最小、立刻到处用）  
+2. **Executor**（把 pool 和 EventLoop 接起来）  
+3. **CancellationToken**（让跨线程任务可停）  
+4. **log / config facade**（项目一多就回本）  
+5. **Channel**（有流水线/生产者消费者时再上）
+
+---
+
+### 设计时记住的三条“不耦合”规则
+
+1. **只依赖标准库 + 你自己的头文件**；第三方通过 adapter/trait 接入。  
+2. **不拥有业务类型**：用模板、`std::span`、回调、`std::any`/`std::function` 慎用处要有 `function_ref`。  
+3. **生命周期比功能更重要**：像你信号槽里的 `ScopedConnection` / `invalidate`，胶水组件的价值大半在“不会用挂”。
+
