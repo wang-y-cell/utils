@@ -1,7 +1,7 @@
 /**
  * Expected / Result 使用教程（可运行）
- * 编译: cmake --build build --target expected_demo
- * 运行: ./build/expected_demo
+ * 编译: cmake --build build --target demo_expected
+ * 运行: ./build/demo_expected
  *
  * 要点:
  * - 业务失败: return result_err / unexpected（不要 throw）

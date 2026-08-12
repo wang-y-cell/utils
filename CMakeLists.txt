@@ -11,24 +11,44 @@ else()
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(utils_main main.cpp)
-target_include_directories(utils_main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+function(utils_add_exe name)
+  add_executable(${name} ${ARGN})
+  target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(UNIX)
+    target_link_libraries(${name} PRIVATE pthread)
+  endif()
+endfunction()
 
-add_executable(smoke_glue tests/smoke_glue.cpp)
-target_include_directories(smoke_glue PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+utils_add_exe(utils_main main.cpp)
+utils_add_exe(smoke_glue tests/smoke_glue.cpp)
 
-if(UNIX)
-  target_link_libraries(utils_main PRIVATE pthread)
-  target_link_libraries(smoke_glue PRIVATE pthread)
-endif()
+# ---- demos ----
+utils_add_exe(demo_expected      demo/result/expected_demo.cpp)
+utils_add_exe(demo_scope_guard   demo/scope_guard/demo.cpp)
+utils_add_exe(demo_functional    demo/functional/demo.cpp)
+utils_add_exe(demo_span          demo/span/demo.cpp)
+utils_add_exe(demo_executor      demo/executor/demo.cpp)
+utils_add_exe(demo_thread_pool   demo/thread_pool/demo.cpp)
+utils_add_exe(demo_signal        demo/signal_and_slots/sample.cpp)
+utils_add_exe(demo_cancel        demo/cancel/demo.cpp)
+utils_add_exe(demo_deadline      demo/time/demo.cpp)
+utils_add_exe(demo_retry         demo/retry/demo.cpp)
+utils_add_exe(demo_channel       demo/channel/demo.cpp)
+utils_add_exe(demo_config        demo/config/demo.cpp)
+utils_add_exe(demo_log           demo/log/demo.cpp)
 
-add_executable(signal_sample signal_and_slots/sample.cpp)
-target_include_directories(signal_sample PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/signal_and_slots)
-if(UNIX)
-  target_link_libraries(signal_sample PRIVATE pthread)
-endif()
-
-add_executable(expected_demo result/expected_demo.cpp)
-target_include_directories(expected_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_custom_target(demos DEPENDS
+  demo_expected
+  demo_scope_guard
+  demo_functional
+  demo_span
+  demo_executor
+  demo_thread_pool
+  demo_signal
+  demo_cancel
+  demo_deadline
+  demo_retry
+  demo_channel
+  demo_config
+  demo_log
+)

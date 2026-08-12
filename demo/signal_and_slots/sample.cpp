@@ -1,9 +1,14 @@
 /**
- * QTobserver 使用示例 / 自检
- * 编译: g++ -std=c++17 -O2 -pthread -o QTobserver.exe QTobserver.cpp
+ * signal_and_slots 用法演示
+ * 编译: cmake --build build --target demo_signal
+ *
+ * 要点:
+ * - 槽接收者继承 Object，才能 Queued/Auto 跨线程与析构自动断连
+ * - ConnectionType: Direct / Queued / Auto
+ * - ScopedConnection RAII；WorkerThread + invoke / 定时器
  */
 
-#include "signal_and_slots.h"
+#include "signal_and_slots/signal_and_slots.h"
 
 #include <atomic>
 #include <chrono>

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -154,12 +155,105 @@ static void test_executor() {
     worker.stop();
 }
 
+static void test_cancel_deadline() {
+    auto [token, source] = make_cancellation();
+    assert(!token.stop_requested());
+    source.request_stop();
+    assert(token.stop_requested());
+
+    auto d = Deadline::after(std::chrono::milliseconds(30));
+    assert(!d.expired());
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    assert(d.expired());
+    assert(d.remaining().count() == 0);
+
+    StopWatch sw;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    assert(sw.elapsed_ms() >= 1);
+}
+
+static void test_retry() {
+    int calls = 0;
+    auto r = retry(
+        [&]() -> Result<int> {
+            ++calls;
+            if (calls < 3) {
+                return result_err(std::errc::connection_reset);
+            }
+            return result_ok(42);
+        },
+        RetryPolicy::fixed(5, std::chrono::milliseconds(1)));
+    assert(r && *r == 42);
+    assert(calls == 3);
+
+    calls = 0;
+    auto fail = retry(
+        [&]() -> Result<int> {
+            ++calls;
+            return result_err(std::errc::invalid_argument);
+        },
+        RetryPolicy::fixed(3, std::chrono::milliseconds(1)),
+        [](const std::error_code& ec) {
+            return ec != std::errc::invalid_argument;
+        });
+    assert(!fail);
+    assert(calls == 1);
+}
+
+static void test_channel() {
+    Channel<int> ch(2);
+    assert(ch.send(1));
+    assert(ch.send(2));
+    assert(!ch.try_send(3));  // full
+
+    auto a = ch.recv();
+    assert(a && *a == 1);
+    assert(ch.try_send(3));
+
+    std::thread producer([&] {
+        for (int i = 10; i < 15; ++i) {
+            ch.send(i);
+        }
+        ch.close();
+    });
+
+    int sum = 0;
+    while (auto v = ch.recv()) {
+        sum += *v;
+    }
+    producer.join();
+    // 2,3 left + 10..14
+    assert(sum == 2 + 3 + 10 + 11 + 12 + 13 + 14);
+}
+
+static void test_config_log() {
+    MapConfig cfg;
+    cfg.set("port", static_cast<std::int64_t>(8080));
+    cfg.set("db.host", "localhost");
+    cfg.set_bool("flag", true);
+    assert(cfg.get_int("port") == 8080);
+    assert(cfg.get_bool("flag") == true);
+
+    auto db = cfg.section("db");
+    auto host = db->get_string("host");
+    assert(host && *host == "localhost");
+
+    log::set_backend(std::make_shared<log::NullBackend>());
+    log::set_level(log::Level::Info);
+    log::info("smoke port={}", 8080);
+    log::set_backend(std::make_shared<log::StreamBackend>());
+}
+
 int main() {
     test_expected();
     test_scope_guard();
     test_functional();
     test_span();
     test_executor();
+    test_cancel_deadline();
+    test_retry();
+    test_channel();
+    test_config_log();
     std::cout << "smoke_glue: ok\n";
     return 0;
 }

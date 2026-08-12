@@ -37,6 +37,9 @@ public:
     }
 };
 
+/**
+ * Unexpected<E> — 错误传递，少用异常当控制流（C++20 header-only）
+ */
 template <class E>
 class Unexpected {
 public:
@@ -47,6 +50,7 @@ public:
     constexpr Unexpected& operator=(const Unexpected&) = default;
     constexpr Unexpected& operator=(Unexpected&&) = default;
 
+    //
     template <class Err = E,
               std::enable_if_t<
                   !std::is_same_v<std::remove_cvref_t<Err>, Unexpected> &&
@@ -66,8 +70,9 @@ private:
 };
 
 template <class E>
-Unexpected(E) -> Unexpected<E>;
+Unexpected(E) -> Unexpected<E>; //当没有定义类型的时候，会自动推导类型
 
+/// 工厂函数
 template <class E>
 [[nodiscard]] constexpr Unexpected<std::decay_t<E>> unexpected(E&& e) {
     return Unexpected<std::decay_t<E>>(std::forward<E>(e));

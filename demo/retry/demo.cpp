@@ -1,0 +1,61 @@
+/**
+ * Retry / Backoff 用法演示
+ * 编译: cmake --build build --target demo_retry
+ *
+ * 要点:
+ * - RetryPolicy::fixed / exponential 只描述策略
+ * - retry(op, policy [, should_retry] [, token] [, deadline])
+ * - op 必须返回 Expected/Result；业务失败用 result_err，不要靠异常做控制流
+ */
+
+#include "cancel/cancellation.h"
+#include "retry/retry.h"
+#include "time/deadline.h"
+
+#include <chrono>
+#include <iostream>
+
+using namespace utils;
+using namespace std::chrono_literals;
+
+int main() {
+    std::cout << "=== 1) 指数退避直到成功 ===\n";
+    int calls = 0;
+    auto ok = retry(
+        [&]() -> Result<int> {
+            ++calls;
+            std::cout << "  attempt #" << calls << '\n';
+            if (calls < 3) {
+                return result_err(std::errc::connection_reset);
+            }
+            return result_ok(100);
+        },
+        RetryPolicy::exponential(5, 5ms));
+    std::cout << "  value=" << ok.value_or(-1) << " calls=" << calls << '\n';
+
+    std::cout << "\n=== 2) 谓词：部分错误不可重试 ===\n";
+    calls = 0;
+    auto fail = retry(
+        [&]() -> Result<int> {
+            ++calls;
+            return result_err(std::errc::invalid_argument);
+        },
+        RetryPolicy::fixed(5, 1ms),
+        [](const std::error_code& ec) {
+            // invalid_argument 不重试
+            return ec != std::make_error_code(std::errc::invalid_argument);
+        });
+    std::cout << "  has_value=" << fail.has_value() << " calls=" << calls << '\n';
+
+    std::cout << "\n=== 3) 与取消配合 ===\n";
+    auto [token, source] = make_cancellation();
+    source.request_stop();
+    auto canceled = retry(
+        []() -> Result<int> { return result_ok(1); },
+        RetryPolicy::fixed(3, 1ms), token);
+    std::cout << "  canceled err="
+              << (canceled ? "none" : canceled.error().message()) << '\n';
+
+    std::cout << "\ndemo_retry: ok\n";
+    return 0;
+}
