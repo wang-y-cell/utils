@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * SignalAndSlots — 轻量 Qt 风格信号/槽 + 事件循环（C++17 header-only）
+ * signal_and_slots — 轻量 Qt 风格信号/槽 + 事件循环（C++17 header-only）
  *
  * 日常用法：
  *   #include "signal_and_slots.h"
@@ -453,6 +453,9 @@ public:
     void moveToThread(EventLoop* loop) noexcept {
         loop_.store(loop, std::memory_order_release);
     }
+    void moveToThread(WorkerThread* thread) noexcept {
+        moveToThread(thread ? thread->loop() : nullptr);
+    }
     EventLoop* thread() const noexcept {
         return loop_.load(std::memory_order_acquire);
     }
@@ -523,7 +526,7 @@ template <typename T>
 using object_wptr = std::weak_ptr<T>;
 
 template <typename T, typename... Args>
-object_uptr<T> make_object(Args&&... args) {
+object_uptr<T> make_object_unique(Args&&... args) {
     static_assert(std::is_base_of_v<Object, T>,
                   "T must derive from qto::Object");
     return object_uptr<T>(new T(std::forward<Args>(args)...));
@@ -688,7 +691,11 @@ public:
     }
 
     void emit(const Args&... args) const {
+        // 复用 thread_local 容量，避免每次 emit 堆分配；swap 以支持同线程重入 emit
+        thread_local std::vector<Entry> tls_scratch;
         std::vector<Entry> snapshot;
+        snapshot.swap(tls_scratch);
+        snapshot.clear();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             snapshot.reserve(entries_.size());
@@ -745,6 +752,9 @@ public:
                     });
             }
         }
+
+        snapshot.clear();
+        tls_scratch.swap(snapshot);  // 归还容量供后续 emit 复用
     }
 
     void operator()(const Args&... args) const { emit(args...); }
