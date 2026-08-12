@@ -87,26 +87,32 @@ struct is_unexpected<Unexpected<G>> : std::true_type {};
 template <class U>
 inline constexpr bool is_unexpected_v = is_unexpected<U>::value;
 
+/**
+ * ExpectedStorage — 存储T或E的实际数据（C++20 header-only）
+ * 这个类是 Expected 内部的底层存储层：
+ * 在同一块内存里二选一地存成功值 T 或错误值 E，并管好构造/析构/赋值。
+ */
 template <class T, class E>
 class ExpectedStorage {
 public:
-    ExpectedStorage() = delete;
+    ExpectedStorage() = delete; //显示删除默认构造函数,禁止无参构造,这里写出来是为了表明意图
 
     template <class... Args>
-    explicit ExpectedStorage(std::in_place_t, Args&&... args)
+    explicit ExpectedStorage(std::in_place_t, Args&&... args) //第一个参数表示存储的是T对象
         : has_(true) {
+        //在as_value()中的地址上重新构造T对象
         std::construct_at(std::addressof(as_value()), std::forward<Args>(args)...);
     }
 
     template <class... Args>
-    explicit ExpectedStorage(unexpect_t, Args&&... args) : has_(false) {
+    explicit ExpectedStorage(unexpect_t, Args&&... args) : has_(false) { //第一个参数表示存储的是E对象
         std::construct_at(std::addressof(as_error()), std::forward<Args>(args)...);
     }
 
     ExpectedStorage(const ExpectedStorage& other) : has_(other.has_) {
-        if (other.has_) {
+        if (other.has_) { //如果other存储的是T对象,则在as_value()中的地址上重新构造T对象
             std::construct_at(std::addressof(as_value()), other.as_value());
-        } else {
+        } else { //如果other存储的是E对象,则在as_error()中的地址上重新构造E对象
             std::construct_at(std::addressof(as_error()), other.as_error());
         }
     }
@@ -131,24 +137,26 @@ public:
 
     [[nodiscard]] bool has_value() const noexcept { return has_; }
 
+    //as_value()用来返回T对象的buf地址的引用
     T& as_value() & noexcept {
-        return *std::launder(reinterpret_cast<T*>(buf_));
+        return *std::launder(reinterpret_cast<T*>(buf_)); ///用 std::launder 告知编译器 buf 地址现在有新的 T 对象
     }
     const T& as_value() const& noexcept {
-        return *std::launder(reinterpret_cast<const T*>(buf_));
+        return *std::launder(reinterpret_cast<const T*>(buf_)); ///用 std::launder 告知编译器 buf 地址现在有新的 T 对象
     }
     T&& as_value() && noexcept {
-        return std::move(*std::launder(reinterpret_cast<T*>(buf_)));
+        return std::move(*std::launder(reinterpret_cast<T*>(buf_))); ///用 std::launder 告知编译器 buf 地址现在有新的 T 对象
     }
 
+    //as_error()用来返回E对象的buf地址的引用
     E& as_error() & noexcept {
-        return *std::launder(reinterpret_cast<E*>(buf_));
+        return *std::launder(reinterpret_cast<E*>(buf_)); ///用 std::launder 告知编译器 buf 地址现在有新的 E 对象
     }
     const E& as_error() const& noexcept {
-        return *std::launder(reinterpret_cast<const E*>(buf_));
+        return *std::launder(reinterpret_cast<const E*>(buf_)); ///用 std::launder 告知编译器 buf 地址现在有新的 E 对象
     }
     E&& as_error() && noexcept {
-        return std::move(*std::launder(reinterpret_cast<E*>(buf_)));
+        return std::move(*std::launder(reinterpret_cast<E*>(buf_))); ///用 std::launder 告知编译器 buf 地址现在有新的 E 对象
     }
 
     void destroy() noexcept {
@@ -205,12 +213,13 @@ public:
     }
 
 private:
-    static constexpr std::size_t kSize =
+    static constexpr std::size_t kSize = ///获取T和E中较大的那个类型的字节数
         sizeof(T) > sizeof(E) ? sizeof(T) : sizeof(E);
-    static constexpr std::size_t kAlign =
+    static constexpr std::size_t kAlign = ///获取T和E中较大的那个类型的对齐方式
         alignof(T) > alignof(E) ? alignof(T) : alignof(E);
 
-    alignas(kAlign) unsigned char buf_[kSize]{};
+    alignas(kAlign) unsigned char buf_[kSize]{}; ///对齐到kAlign,大小为kSize的数组
+    ///has_用于判断当前存储的是T还是E,true表示存储的是T,false表示存储的是E
     bool has_;
 };
 
