@@ -1,0 +1,179 @@
+#pragma once
+
+/**
+ * ScopeGuard / ScopeSuccess / ScopeFail / UTILS_DEFER — RAII 收尾（C++20）
+ *
+ * 日常用法：
+ *   auto g = utils::make_scope_guard([&] { close(fd); });
+ *   UTILS_DEFER { unlock(); };
+ *   utils::ScopeFail rollback{[&] { flag = old; }};
+ *
+ * 异常策略：清理函数应不抛；栈展开中再抛 → std::terminate。
+ */
+
+#include <exception>
+#include <type_traits>
+#include <utility>
+
+namespace utils {
+
+template <class F>
+class ScopeGuard {
+public:
+    static_assert(std::is_invocable_v<F&>, "ScopeGuard F must be invocable");
+
+    explicit ScopeGuard(F&& f) noexcept(
+        std::is_nothrow_move_constructible_v<F>)
+        : func_(std::move(f)), active_(true) {}
+
+    explicit ScopeGuard(const F& f) noexcept(
+        std::is_nothrow_copy_constructible_v<F>)
+        : func_(f), active_(true) {}
+
+    ScopeGuard(ScopeGuard&& other) noexcept(
+        std::is_nothrow_move_constructible_v<F>)
+        : func_(std::move(other.func_)), active_(other.active_) {
+        other.active_ = false;
+    }
+
+    ScopeGuard(const ScopeGuard&) = delete;
+    ScopeGuard& operator=(const ScopeGuard&) = delete;
+    ScopeGuard& operator=(ScopeGuard&&) = delete;
+
+    ~ScopeGuard() noexcept {
+        if (active_) {
+            func_();
+        }
+    }
+
+    void dismiss() noexcept { active_ = false; }
+    void release() noexcept { dismiss(); }
+
+    [[nodiscard]] bool active() const noexcept { return active_; }
+
+private:
+    F func_;
+    bool active_;
+};
+
+template <class F>
+[[nodiscard]] ScopeGuard<std::decay_t<F>> make_scope_guard(F&& f) {
+    return ScopeGuard<std::decay_t<F>>(std::forward<F>(f));
+}
+
+template <class F>
+class ScopeSuccess {
+public:
+    explicit ScopeSuccess(F&& f) noexcept(
+        std::is_nothrow_move_constructible_v<F>)
+        : func_(std::move(f)),
+          active_(true),
+          exception_count_(std::uncaught_exceptions()) {}
+
+    explicit ScopeSuccess(const F& f) noexcept(
+        std::is_nothrow_copy_constructible_v<F>)
+        : func_(f),
+          active_(true),
+          exception_count_(std::uncaught_exceptions()) {}
+
+    ScopeSuccess(ScopeSuccess&& other) noexcept(
+        std::is_nothrow_move_constructible_v<F>)
+        : func_(std::move(other.func_)),
+          active_(other.active_),
+          exception_count_(other.exception_count_) {
+        other.active_ = false;
+    }
+
+    ScopeSuccess(const ScopeSuccess&) = delete;
+    ScopeSuccess& operator=(const ScopeSuccess&) = delete;
+    ScopeSuccess& operator=(ScopeSuccess&&) = delete;
+
+    ~ScopeSuccess() noexcept {
+        if (active_ && std::uncaught_exceptions() == exception_count_) {
+            func_();
+        }
+    }
+
+    void dismiss() noexcept { active_ = false; }
+    void release() noexcept { dismiss(); }
+
+private:
+    F func_;
+    bool active_;
+    int exception_count_;
+};
+
+template <class F>
+[[nodiscard]] ScopeSuccess<std::decay_t<F>> make_scope_success(F&& f) {
+    return ScopeSuccess<std::decay_t<F>>(std::forward<F>(f));
+}
+
+template <class F>
+class ScopeFail {
+public:
+    explicit ScopeFail(F&& f) noexcept(std::is_nothrow_move_constructible_v<F>)
+        : func_(std::move(f)),
+          active_(true),
+          exception_count_(std::uncaught_exceptions()) {}
+
+    explicit ScopeFail(const F& f) noexcept(
+        std::is_nothrow_copy_constructible_v<F>)
+        : func_(f),
+          active_(true),
+          exception_count_(std::uncaught_exceptions()) {}
+
+    ScopeFail(ScopeFail&& other) noexcept(
+        std::is_nothrow_move_constructible_v<F>)
+        : func_(std::move(other.func_)),
+          active_(other.active_),
+          exception_count_(other.exception_count_) {
+        other.active_ = false;
+    }
+
+    ScopeFail(const ScopeFail&) = delete;
+    ScopeFail& operator=(const ScopeFail&) = delete;
+    ScopeFail& operator=(ScopeFail&&) = delete;
+
+    ~ScopeFail() noexcept {
+        if (active_ && std::uncaught_exceptions() > exception_count_) {
+            func_();
+        }
+    }
+
+    void dismiss() noexcept { active_ = false; }
+    void release() noexcept { dismiss(); }
+
+private:
+    F func_;
+    bool active_;
+    int exception_count_;
+};
+
+template <class F>
+[[nodiscard]] ScopeFail<std::decay_t<F>> make_scope_fail(F&& f) {
+    return ScopeFail<std::decay_t<F>>(std::forward<F>(f));
+}
+
+namespace detail {
+
+struct DeferFactory {
+    template <class F>
+    [[nodiscard]] ScopeGuard<std::decay_t<F>> operator<<(F&& f) const {
+        return ScopeGuard<std::decay_t<F>>(std::forward<F>(f));
+    }
+};
+
+}  // namespace detail
+
+}  // namespace utils
+
+#define UTILS_CONCAT_INNER(a, b) a##b
+#define UTILS_CONCAT(a, b) UTILS_CONCAT_INNER(a, b)
+
+/**
+ * UTILS_DEFER { cleanup(); };
+ * 在作用域结束时执行；可用 auto& 变量名若需 dismiss，请改用 make_scope_guard。
+ */
+#define UTILS_DEFER                                   \
+    const auto UTILS_CONCAT(_utils_defer_, __LINE__) = \
+        ::utils::detail::DeferFactory{} << [&]()

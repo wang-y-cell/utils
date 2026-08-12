@@ -11,7 +11,7 @@
 #include <string>
 #include <thread>
 
-using namespace qto;
+using namespace utils;
 using namespace std::chrono_literals;
 
 class Button : public Object {

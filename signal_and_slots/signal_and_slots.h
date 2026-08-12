@@ -5,7 +5,7 @@
  *
  * 日常用法：
  *   #include "signal_and_slots.h"
- *   using namespace qto;
+ *   using namespace utils;
  *
  * 能力：
  *   - ConnectionType: Direct / Queued / Auto
@@ -18,6 +18,8 @@
  *   - CoreApplication / ensure_thread_loop：每线程默认 EventLoop（仿 QThread 亲和）
  *   - connect 语法糖
  *   - invoke：把可调用对象投递到目标 Object 所在线程
+ *
+ * 命名空间：utils（旧名 qto 仍可用别名兼容）
  *
  * 使用注意：
  *   1) 跨线程 Object 销毁前先 WorkerThread::stop() / 排空队列
@@ -45,7 +47,7 @@
 #include <utility>
 #include <vector>
 
-namespace qto {
+namespace utils {
 
 enum class ConnectionType {
     Direct,  // 同步：在 emit 所在线程执行
@@ -528,14 +530,14 @@ using object_wptr = std::weak_ptr<T>;
 template <typename T, typename... Args>
 object_uptr<T> make_object_unique(Args&&... args) {
     static_assert(std::is_base_of_v<Object, T>,
-                  "T must derive from qto::Object");
+                  "T must derive from utils::Object");
     return object_uptr<T>(new T(std::forward<Args>(args)...));
 }
 
 template <typename T, typename... Args>
 object_sptr<T> make_object_shared(Args&&... args) {
     static_assert(std::is_base_of_v<Object, T>,
-                  "T must derive from qto::Object");
+                  "T must derive from utils::Object");
     return object_sptr<T>(new T(std::forward<Args>(args)...),
                           ObjectDeleteLater{});
 }
@@ -579,7 +581,7 @@ public:
     Connection connect(Recv* receiver, void (SlotClass::*method)(SlotArgs...),
                        ConnectionType type = ConnectionType::Auto) {
         static_assert(std::is_base_of_v<Object, Recv>,
-                      "receiver must derive from qto::Object");
+                      "receiver must derive from utils::Object");
         if (!receiver || !method) return {};
         return connect(
             static_cast<Object*>(receiver),
@@ -594,7 +596,7 @@ public:
                        void (SlotClass::*method)(SlotArgs...) const,
                        ConnectionType type = ConnectionType::Auto) {
         static_assert(std::is_base_of_v<Object, Recv>,
-                      "receiver must derive from qto::Object");
+                      "receiver must derive from utils::Object");
         if (!receiver || !method) return {};
         return connect(
             static_cast<Object*>(receiver),
@@ -957,4 +959,7 @@ Connection connect(Signal<Args...>& signal, const std::weak_ptr<Recv>& receiver,
     return signal.connect(receiver, std::move(slot), type);
 }
 
-}  // namespace qto
+}  // namespace utils
+
+// 兼容旧代码：优先改用 utils
+namespace qto = utils;
