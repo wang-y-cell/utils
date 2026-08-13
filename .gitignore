@@ -1,2 +1,10 @@
 build/
 main.cpp
+libpath/
+cmake/
+
+*.exe
+*.dll
+*.lib 
+*.o 
+*.obj
