@@ -66,7 +66,7 @@ public:
     constexpr const E&& error() const&& noexcept { return std::move(error_); }
 
 private:
-    E error_;
+    E error_; ///可以存放error_code
 };
 
 template <class E>
@@ -91,6 +91,7 @@ inline constexpr bool is_unexpected_v = is_unexpected<U>::value;
  * ExpectedStorage — 存储T或E的实际数据（C++20 header-only）
  * 这个类是 Expected 内部的底层存储层：
  * 在同一块内存里二选一地存成功值 T 或错误值 E，并管好构造/析构/赋值。
+ * 存放的buf_值是返回值
  */
 template <class T, class E>
 class ExpectedStorage {
@@ -218,6 +219,7 @@ private:
     static constexpr std::size_t kAlign = ///获取T和E中较大的那个类型的对齐方式
         alignof(T) > alignof(E) ? alignof(T) : alignof(E);
 
+    //如果结果正常buf_的值是返回的结果，如果结果异常，buf_的值可能是error_code，具体代码传的参数
     alignas(kAlign) unsigned char buf_[kSize]{}; ///对齐到kAlign,大小为kSize的数组
     ///has_用于判断当前存储的是T还是E,true表示存储的是T,false表示存储的是E
     bool has_;
@@ -306,7 +308,9 @@ public:
 
 private:
     alignas(E) unsigned char buf_[sizeof(E)]{};
-    bool has_;
+
+    ///has_用于判断当前存储的是T还是E,true表示存储的是T,false表示存储的是E
+    bool has_; 
 };
 
 }  // namespace detail
@@ -374,20 +378,24 @@ public:
     }
 
     [[nodiscard]] bool has_value() const noexcept { return storage_.has_value(); }
+    //bool判断的运算符重载
     [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
+    //如果结果成功，返回的值就是实际的返回值，如果结果失败就抛出异常
     T& value() & {
         if (!has_value()) {
             throw BadExpectedAccess{};
         }
         return storage_.as_value();
     }
+    //如果结果成功，返回的值就是实际的返回值，如果结果失败就抛出异常
     const T& value() const& {
         if (!has_value()) {
             throw BadExpectedAccess{};
         }
         return storage_.as_value();
     }
+    //如果结果成功，返回的值就是实际的返回值，如果结果失败就抛出异常
     T&& value() && {
         if (!has_value()) {
             throw BadExpectedAccess{};
@@ -395,6 +403,7 @@ public:
         return std::move(storage_.as_value());
     }
 
+    //获得错误码，如果结果是正确的则终止
     E& error() & {
         assert(!has_value());
         return storage_.as_error();
@@ -408,23 +417,27 @@ public:
         return std::move(storage_.as_error());
     }
 
+    //判断是否有值，如果有值就返回这个值，否则返回def
     template <class U>
     T value_or(U&& def) const& {
         return has_value() ? storage_.as_value()
                            : static_cast<T>(std::forward<U>(def));
     }
+    //判断是否有值，如果有值就返回这个值，否则返回def
     template <class U>
     T value_or(U&& def) && {
         return has_value() ? std::move(storage_.as_value())
                            : static_cast<T>(std::forward<U>(def));
     }
 
+    //如果有error返回error，否则返回def值
     template <class G = E>
     E error_or(G&& def) const& {
         return !has_value() ? storage_.as_error()
                             : static_cast<E>(std::forward<G>(def));
     }
 
+    //解引用操作符,用来返回T对象的值
     T& operator*() & noexcept { return storage_.as_value(); }
     const T& operator*() const& noexcept { return storage_.as_value(); }
     T&& operator*() && noexcept { return std::move(storage_.as_value()); }
@@ -434,6 +447,8 @@ public:
         return std::addressof(storage_.as_value());
     }
 
+    ///传入一个函数，如果返回值结果正确就将这个返回值作为函数的参数传递进去并返回调用返回值
+    ///否则返回错误result
     template <class F>
     auto and_then(F&& f) & {
         using U = std::remove_cvref_t<std::invoke_result_t<F, T&>>;
@@ -442,6 +457,8 @@ public:
         }
         return U(unexpect, storage_.as_error());
     }
+    ///传入一个函数，如果返回值结果正确就将这个返回值作为函数的参数传递进去并返回调用返回值
+    ///否则返回错误result
     template <class F>
     auto and_then(F&& f) const& {
         using U = std::remove_cvref_t<std::invoke_result_t<F, const T&>>;
@@ -450,6 +467,8 @@ public:
         }
         return U(unexpect, storage_.as_error());
     }
+    ///传入一个函数，如果返回值结果正确就将这个返回值作为函数的参数传递进去并返回调用返回值
+    ///否则返回错误result
     template <class F>
     auto and_then(F&& f) && {
         using U = std::remove_cvref_t<std::invoke_result_t<F, T&&>>;
@@ -459,6 +478,7 @@ public:
         return U(unexpect, std::move(storage_.as_error()));
     }
 
+    //成功时用函数把值映射成新值；失败时错误原样传递，不调用函数
     template <class F>
     auto transform(F&& f) & {
         using U = std::remove_cv_t<std::invoke_result_t<F, T&>>;

@@ -4,6 +4,7 @@ project(utils)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_BUILD_TYPE Debug)
 
 if(MSVC)
   add_compile_options(/W4 /permissive-)
@@ -19,7 +20,7 @@ function(utils_add_exe name)
   endif()
 endfunction()
 
-utils_add_exe(utils_main main.cpp)
+# utils_add_exe(utils_main main.cpp)
 utils_add_exe(smoke_glue tests/smoke_glue.cpp)
 
 # ---- demos ----
