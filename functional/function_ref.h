@@ -22,8 +22,10 @@ namespace detail {
 template <class T>
 using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
 
+//任何类型
 template <class T>
 constexpr bool is_function_ref_v = false;
+//function_ref<Sig> 特化
 template <class Sig>
 constexpr bool is_function_ref_v<function_ref<Sig>> = true;
 
@@ -83,7 +85,7 @@ public:
 private:
     using thunk_t = R (*)(void*, Args...);
     void* obj_ = nullptr;
-    thunk_t thunk_ = nullptr;
+    thunk_t thunk_ = nullptr; //函数指针
 };
 
 template <class R, class... Args>
@@ -129,8 +131,8 @@ public:
 
 private:
     using thunk_t = R (*)(void*, Args...) noexcept;
-    void* obj_ = nullptr;
-    thunk_t thunk_ = nullptr;
+    void* obj_ = nullptr; ///存放实际调用函数的函数指针
+    thunk_t thunk_ = nullptr; //存放调用obj的函数的函数指针,负责将obj_的函数指针转换为thunk_t类型
 };
 
 // const 限定：绑定到 const 可调用
@@ -151,7 +153,7 @@ public:
                       std::is_invocable_r_v<R, const detail::remove_cvref_t<F>&,
                                             Args...>,
                   int> = 0>
-    function_ref(F&& f) noexcept
+    function_ref(F&& f) noexcept //任何类型参数(除了function_ref<Sig> 特化,且必须要可调用)
         : obj_(const_cast<void*>(static_cast<const void*>(std::addressof(f)))),
           thunk_(+[](void* obj, Args... args) -> R {
               const auto& ref =
@@ -171,8 +173,8 @@ public:
 
 private:
     using thunk_t = R (*)(void*, Args...);
-    void* obj_ = nullptr;
-    thunk_t thunk_ = nullptr;
+    void* obj_ = nullptr; ///存放实际调用函数的函数指针
+    thunk_t thunk_ = nullptr; //存放调用obj的函数的函数指针,负责将obj_的函数指针转换为thunk_t类型
 };
 
 }  // namespace utils

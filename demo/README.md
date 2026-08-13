@@ -26,11 +26,9 @@ cmake --build build --target demo_expected
 | `demo_expected` | `demo/result/expected_demo.cpp` | Result / Expected |
 | `demo_scope_guard` | `demo/scope_guard/demo.cpp` | ScopeGuard |
 | `demo_functional` | `demo/functional/demo.cpp` | function_ref / any_invocable |
-| `demo_span` | `demo/span/demo.cpp` | span_utils |
 | `demo_executor` | `demo/executor/demo.cpp` | Executor |
 | `demo_thread_pool` | `demo/thread_pool/demo.cpp` | thread_pool |
 | `demo_signal` | `demo/signal_and_slots/sample.cpp` | 信号与槽 |
-| `demo_cancel` | `demo/cancel/demo.cpp` | CancellationToken |
 | `demo_deadline` | `demo/time/demo.cpp` | StopWatch / Deadline |
 | `demo_retry` | `demo/retry/demo.cpp` | Retry / Backoff |
 | `demo_channel` | `demo/channel/demo.cpp` | Channel |
@@ -87,20 +85,7 @@ utils::any_invocable<void()> task = [p = std::make_unique<T>()] { p->run(); };
 
 ---
 
-## 4. span_utils — 非拥有缓冲区视图
-
-**解决**：接口不绑死 `vector`，只接收连续内存视图。
-
-```cpp
-void process(utils::const_byte_span data);
-process(utils::as_span(buf));
-utils::trim("  hi ");
-for (auto part : utils::split("a,b,c", ',')) { ... }
-```
-
----
-
-## 5. Executor — 统一“在哪执行”
+## 4. Executor — 统一“在哪执行”
 
 **解决**：业务只依赖 `post(f)`，运行时可换线程池 / EventLoop / 同步执行。
 
@@ -116,7 +101,7 @@ utils::AnyExecutor any = ex;  // 类型擦除
 
 ---
 
-## 6. thread_pool — 任务线程池
+## 5. thread_pool — 任务线程池
 
 ```cpp
 utils::thread_pool pool(4, /*max_queue=*/1024);
@@ -131,7 +116,7 @@ pool.shutdown();
 
 ---
 
-## 7. signal_and_slots — 跨线程信号槽
+## 6. signal_and_slots — 跨线程信号槽
 
 **解决**：Qt 风格事件、对象线程亲和、Queued 投递。
 
@@ -146,19 +131,7 @@ signal.connect([] { ... });  // 无 receiver：仅 Direct
 
 ---
 
-## 8. CancellationToken — 协作取消
-
-```cpp
-auto [token, source] = utils::make_cancellation();
-// 任务内: while (!token.stop_requested()) { ... }
-source.request_stop();
-```
-
-基于 `std::stop_token`，不强制杀线程。
-
----
-
-## 9. StopWatch / Deadline — 计时与截止
+## 7. StopWatch / Deadline — 计时与截止
 
 ```cpp
 auto d = utils::Deadline::after(200ms);
@@ -170,23 +143,26 @@ utils::StopWatch sw;
 std::cout << sw.elapsed_ms();
 ```
 
+协作取消请直接用标准库 `std::stop_token` / `std::stop_source`。
+
 ---
 
-## 10. Retry / Backoff — 重试策略
+## 8. Retry / Backoff — 重试策略
 
 ```cpp
+std::stop_source source;
 auto r = utils::retry(
     []() -> utils::Result<int> { return fetch(); },
     utils::RetryPolicy::exponential(5, 10ms),
-    token, deadline);
+    source.get_token(), deadline);
 // 或带谓词：仅部分错误可重试
 ```
 
-只描述策略；真正的 RPC/IO 由 lambda 完成。
+只描述策略；真正的 RPC/IO 由 lambda 完成。取消参数类型为 `std::stop_token`。
 
 ---
 
-## 11. Channel — 线程间数据管道
+## 9. Channel — 线程间数据管道
 
 ```cpp
 utils::Channel<int> ch(64);  // 0 = 无界
@@ -199,7 +175,7 @@ ch.close();
 
 ---
 
-## 12. ConfigView — 配置视图
+## 10. ConfigView — 配置视图
 
 ```cpp
 utils::MapConfig cfg;
@@ -214,7 +190,7 @@ utils::EnvConfig env("MYAPP_");  // MYAPP_PORT
 
 ---
 
-## 13. Logging facade — 日志门面
+## 11. Logging facade — 日志门面
 
 ```cpp
 utils::log::set_backend(std::make_shared<utils::log::StreamBackend>());
@@ -232,7 +208,7 @@ utils::log::info("listen port={}", 8080);
 ```text
 Config 读参数 → log 记录
 → thread_pool / Executor 跑任务
-→ Cancellation + Deadline + Retry 控制失败与超时
+→ std::stop_token + Deadline + Retry 控制失败与超时
 → Channel / Signal 传递结果与事件
 → ScopeGuard / Expected 管资源与错误
 ```

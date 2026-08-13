@@ -6,9 +6,10 @@
  *   auto r = utils::retry(
  *       []() -> utils::Result<int> { return fetch(); },
  *       utils::RetryPolicy::exponential(5, 10ms));
+ *
+ * 取消使用标准库 std::stop_token（可选参数）。
  */
 
-#include "cancel/cancellation.h"
 #include "result/expected.h"
 #include "time/deadline.h"
 
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <optional>
 #include <random>
+#include <stop_token>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -113,7 +115,7 @@ R make_cancel_result() {
  */
 template <class F, class Pred>
 auto retry(F&& op, RetryPolicy policy, Pred&& should_retry,
-           CancellationToken token = {},
+           std::stop_token token = {},
            Deadline deadline = Deadline::never())
     -> std::invoke_result_t<F&> {
     using R = std::invoke_result_t<F&>;
@@ -160,7 +162,7 @@ auto retry(F&& op, RetryPolicy policy, Pred&& should_retry,
 }
 
 template <class F>
-auto retry(F&& op, RetryPolicy policy, CancellationToken token = {},
+auto retry(F&& op, RetryPolicy policy, std::stop_token token = {},
            Deadline deadline = Deadline::never()) {
     return retry(
         std::forward<F>(op), std::move(policy),

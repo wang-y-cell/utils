@@ -5,7 +5,7 @@
  * 要点:
  * - Deadline::after / remaining / expired：截止时间语义
  * - StopWatch：测量耗时（调试、指标）
- * - 常与 Channel::recv 超时逻辑、retry、取消组合
+ * - 常与 Channel::recv 超时逻辑、retry、std::stop_token 组合
  */
 
 #include "time/deadline.h"

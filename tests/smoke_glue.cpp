@@ -100,24 +100,6 @@ static void test_functional() {
     from_sf();
 }
 
-static void test_span() {
-    std::vector<int> v{1, 2, 3};
-    auto s = as_span(v);
-    assert(s.size() == 3 && s[0] == 1);
-
-    auto bytes = as_bytes(s);
-    assert(bytes.size() == 3 * sizeof(int));
-
-    assert(trim("  hi \n") == "hi");
-
-    int count = 0;
-    for (auto part : split("a,b,c", ',')) {
-        (void)part;
-        ++count;
-    }
-    assert(count == 3);
-}
-
 static void test_executor() {
     InlineExecutor inline_ex;
     int x = 0;
@@ -155,12 +137,7 @@ static void test_executor() {
     worker.stop();
 }
 
-static void test_cancel_deadline() {
-    auto [token, source] = make_cancellation();
-    assert(!token.stop_requested());
-    source.request_stop();
-    assert(token.stop_requested());
-
+static void test_deadline() {
     auto d = Deadline::after(std::chrono::milliseconds(30));
     assert(!d.expired());
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
@@ -248,9 +225,8 @@ int main() {
     test_expected();
     test_scope_guard();
     test_functional();
-    test_span();
     test_executor();
-    test_cancel_deadline();
+    test_deadline();
     test_retry();
     test_channel();
     test_config_log();

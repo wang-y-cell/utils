@@ -46,14 +46,17 @@ public:
         }
     }
 
+    /** @brief 销毁这个对象时，不执行这个函数 */
     void dismiss() noexcept { active_ = false; }
+    /** @brief 销毁这个对象时，执行这个函数 */
     void release() noexcept { dismiss(); }
 
+    /** @brief 是否激活 */
     [[nodiscard]] bool active() const noexcept { return active_; }
 
 private:
-    F func_;
-    bool active_;
+    F func_; //当这个对象被销毁时，会执行这个函数
+    bool active_; //是否激活
 };
 
 template <class F>
@@ -68,7 +71,7 @@ public:
         std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(f)),
           active_(true),
-          exception_count_(std::uncaught_exceptions()) {}
+          exception_count_(std::uncaught_exceptions()) {} //当前的异常还没有被catch到的数量
 
     explicit ScopeSuccess(const F& f) noexcept(
         std::is_nothrow_copy_constructible_v<F>)
@@ -89,6 +92,7 @@ public:
     ScopeSuccess& operator=(ScopeSuccess&&) = delete;
 
     ~ScopeSuccess() noexcept {
+        /** 如果当前的异常还没有被catch到的数量等于初始化时的异常还没有被catch到的数量，则执行这个函数 */
         if (active_ && std::uncaught_exceptions() == exception_count_) {
             func_();
         }
@@ -100,7 +104,7 @@ public:
 private:
     F func_;
     bool active_;
-    int exception_count_;
+    int exception_count_; //当前的异常还没有被catch到的数量
 };
 
 template <class F>

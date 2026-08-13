@@ -4,16 +4,17 @@
  *
  * 要点:
  * - RetryPolicy::fixed / exponential 只描述策略
- * - retry(op, policy [, should_retry] [, token] [, deadline])
+ * - retry(op, policy [, should_retry] [, stop_token] [, deadline])
  * - op 必须返回 Expected/Result；业务失败用 result_err，不要靠异常做控制流
+ * - 取消请直接用 std::stop_token / std::stop_source
  */
 
-#include "cancel/cancellation.h"
 #include "retry/retry.h"
 #include "time/deadline.h"
 
 #include <chrono>
 #include <iostream>
+#include <stop_token>
 
 using namespace utils;
 using namespace std::chrono_literals;
@@ -47,12 +48,12 @@ int main() {
         });
     std::cout << "  has_value=" << fail.has_value() << " calls=" << calls << '\n';
 
-    std::cout << "\n=== 3) 与取消配合 ===\n";
-    auto [token, source] = make_cancellation();
+    std::cout << "\n=== 3) 与 std::stop_token 配合 ===\n";
+    std::stop_source source;
     source.request_stop();
     auto canceled = retry(
         []() -> Result<int> { return result_ok(1); },
-        RetryPolicy::fixed(3, 1ms), token);
+        RetryPolicy::fixed(3, 1ms), source.get_token());
     std::cout << "  canceled err="
               << (canceled ? "none" : canceled.error().message()) << '\n';
 
