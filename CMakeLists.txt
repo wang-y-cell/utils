@@ -35,6 +35,7 @@ utils_add_exe(demo_retry         demo/retry/demo.cpp)
 utils_add_exe(demo_channel       demo/channel/demo.cpp)
 utils_add_exe(demo_config        demo/config/demo.cpp)
 utils_add_exe(demo_log           demo/log/demo.cpp)
+utils_add_exe(demo_sql           demo/sql/demo.cpp)
 
 add_custom_target(demos DEPENDS
   demo_expected
@@ -48,4 +49,5 @@ add_custom_target(demos DEPENDS
   demo_channel
   demo_config
   demo_log
+  demo_sql
 )

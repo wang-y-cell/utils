@@ -9,7 +9,7 @@
  * - dismiss(): 取消清理（例如所有权已移交）
  */
 
-#include "scope_guard/scope_guard.h"
+#include "component/scope_guard/scope_guard.h"
 
 #include <iostream>
 #include <stdexcept>

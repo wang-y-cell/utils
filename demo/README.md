@@ -17,23 +17,32 @@ cmake --build build --target demo_expected
 头文件总入口：`#include "utils/utils.h"`  
 （`thread_pool` / `signal_and_slots` 体量较大，按需单独包含。）
 
+源码分层：
+
+| 目录 | 含义 |
+|------|------|
+| `adapter/` | 门面：`config` / `log` / `executor` / `sql` |
+| `component/` | 功能组件：`expected`、`thread_pool`、`channel` 等 |
+| `docs/adapter-plan.md` | 后续可新增门面的规划 |
+
 ---
 
 ## 模块一览
 
-| Demo 目标 | 源文件 | 模块 |
-|-----------|--------|------|
-| `demo_expected` | `demo/result/expected_demo.cpp` | result / expected |
-| `demo_scope_guard` | `demo/scope_guard/demo.cpp` | scope_guard |
-| `demo_functional` | `demo/functional/demo.cpp` | function_ref / any_invocable |
-| `demo_executor` | `demo/executor/demo.cpp` | executor |
-| `demo_thread_pool` | `demo/thread_pool/demo.cpp` | thread_pool |
-| `demo_signal` | `demo/signal_and_slots/sample.cpp` | 信号与槽 |
-| `demo_deadline` | `demo/time/demo.cpp` | stop_watch / deadline |
-| `demo_retry` | `demo/retry/demo.cpp` | Retry / Backoff |
-| `demo_channel` | `demo/channel/demo.cpp` | channel |
-| `demo_config` | `demo/config/demo.cpp` | config_view |
-| `demo_log` | `demo/log/demo.cpp` | Logging facade |
+| Demo 目标 | 源文件 | 模块 | 层 |
+|-----------|--------|------|----|
+| `demo_expected` | `demo/result/expected_demo.cpp` | result / expected | component |
+| `demo_scope_guard` | `demo/scope_guard/demo.cpp` | scope_guard | component |
+| `demo_functional` | `demo/functional/demo.cpp` | function_ref / any_invocable | component |
+| `demo_executor` | `demo/executor/demo.cpp` | executor | adapter |
+| `demo_thread_pool` | `demo/thread_pool/demo.cpp` | thread_pool | component |
+| `demo_signal` | `demo/signal_and_slots/sample.cpp` | 信号与槽 | component |
+| `demo_deadline` | `demo/time/demo.cpp` | stop_watch / deadline | component |
+| `demo_retry` | `demo/retry/demo.cpp` | Retry / Backoff | component |
+| `demo_channel` | `demo/channel/demo.cpp` | channel | component |
+| `demo_config` | `demo/config/demo.cpp` | config_view | adapter |
+| `demo_log` | `demo/log/demo.cpp` | Logging facade | adapter |
+| `demo_sql` | `demo/sql/demo.cpp` | 关系库门面 | adapter |
 
 ---
 
@@ -42,7 +51,7 @@ cmake --build build --target demo_expected
 **解决**：用返回值表示成功/失败，少用异常当控制流。
 
 ```cpp
-#include "result/expected.h"
+#include "component/result/expected.h"
 result<int> r = result_ok(42);
 if (!r) { use(r.error()); }
 else    { use(*r); }
@@ -90,8 +99,8 @@ utils::any_invocable<void()> task = [p = std::make_unique<T>()] { p->run(); };
 **解决**：业务只依赖 `post(f)`，运行时可换线程池 / event_loop / 同步执行。
 
 ```cpp
-#include "executor/executor.h"
-#include "executor/adapters.h"
+#include "adapter/executor/executor.h"
+#include "adapter/executor/adapters.h"
 utils::inline_executor sync;
 utils::thread_pool pool(4);
 auto ex = utils::make_executor(pool);
@@ -200,6 +209,24 @@ utils::log::info("listen port={}", 8080);
 ```
 
 业务不直接依赖 spdlog；换后端只改 `set_backend`。
+
+---
+
+## 12. sql — 关系库门面
+
+```cpp
+#include "adapter/sql/sql.h"
+utils::sql::memory_db db;
+db.on_query("SELECT 1", {{"n"}, {{"1"}}});
+auto conn = db.open();
+auto rows = conn.value()->query("SELECT 1");
+conn.value()->begin();
+conn.value()->commit();
+```
+
+同一访问模型（SQL + 事务）共用此门面；Redis 等 KV 不要塞进来。真库实现 `sql::connection` 即可。
+
+网络（TCP/HTTP/WS）请直接使用 Boost.Asio / Beast，本库不做网络门面。
 
 ---
 

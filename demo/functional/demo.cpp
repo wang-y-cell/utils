@@ -7,8 +7,8 @@
  * - any_invocable: 拥有且只移动，可存 unique_ptr 捕获；相对 std::function 不要求可拷贝
  */
 
-#include "functional/any_invocable.h"
-#include "functional/function_ref.h"
+#include "component/functional/any_invocable.h"
+#include "component/functional/function_ref.h"
 
 #include <functional>
 #include <iostream>

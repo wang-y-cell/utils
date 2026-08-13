@@ -3,7 +3,7 @@
  */
 
 #include "utils/utils.h"
-#include "executor/adapters.h"
+#include "adapter/executor/adapters.h"
 
 #include <atomic>
 #include <cassert>
@@ -30,7 +30,7 @@ static void test_expected() {
 
     expected<void, int> okv;
     assert(okv);
-    expected<void, int> bad = unexpected(3);
+    expected<void, int> bad = utils::unexpected(3);
     assert(!bad && bad.error() == 3);
 
     auto chained =
@@ -221,6 +221,18 @@ static void test_config_log() {
     log::set_backend(std::make_shared<log::stream_backend>());
 }
 
+static void test_sql() {
+    sql::memory_db db;
+    db.on_query("SELECT 1", sql::result_set{{"n"}, {{std::string{"1"}}}});
+    auto conn = db.open();
+    assert(conn);
+    auto q = conn.value()->query("SELECT 1");
+    assert(q && q->rows.size() == 1);
+    assert(conn.value()->begin());
+    assert(conn.value()->in_transaction());
+    assert(conn.value()->commit());
+}
+
 int main() {
     test_expected();
     test_scope_guard();
@@ -230,6 +242,7 @@ int main() {
     test_retry();
     test_channel();
     test_config_log();
+    test_sql();
     std::cout << "smoke_glue: ok\n";
     return 0;
 }

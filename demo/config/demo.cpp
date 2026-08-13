@@ -9,7 +9,7 @@
  * - env_config: 环境变量前缀适配，不绑 JSON 库
  */
 
-#include "config/config_view.h"
+#include "adapter/config/config_view.h"
 
 #include <cstdint>
 #include <iostream>

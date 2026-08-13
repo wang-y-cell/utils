@@ -3,10 +3,10 @@
 /**
  * executor 核心：concept + inline_executor + any_executor（C++20）
  *
- * 适配 thread_pool / event_loop 见 executor/adapters.h
+ * 适配 thread_pool / event_loop 见 adapter/executor/adapters.h
  */
 
-#include "functional/any_invocable.h"
+#include "component/functional/any_invocable.h"
 
 #include <concepts>
 #include <memory>

@@ -9,7 +9,7 @@
  * - 链式: and_then / transform / or_else / transform_error
  */
 
-#include "result/expected.h"
+#include "component/result/expected.h"
 
 #include <iostream>
 #include <string>
@@ -35,7 +35,7 @@ result<void> ensure_ready(bool ready) {
 }
 
 expected<std::string, std::string> load_name(bool ok_flag) {
-    if (!ok_flag) return unexpected(std::string{"name missing"});
+    if (!ok_flag) return utils::unexpected(std::string{"name missing"});
     return expected<std::string, std::string>(std::in_place, "alice");
 }
 
@@ -80,7 +80,7 @@ int main() {
 
     std::cout << "\n=== void / 自定义错误 ===\n";
     expected<void, int> okv;
-    expected<void, int> bad = unexpected(3);
+    expected<void, int> bad = utils::unexpected(3);
     std::cout << "void_ok=" << okv.has_value() << " bad=" << bad.error() << '\n';
     auto name = load_name(false);
     if (!name) std::cout << "load_name err=" << name.error() << '\n';

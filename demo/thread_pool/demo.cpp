@@ -8,7 +8,7 @@
  * - 有界队列背压；wait / shutdown / resize
  */
 
-#include "thread_pool/thread_pool.h"
+#include "component/thread_pool/thread_pool.h"
 
 #include <chrono>
 #include <iostream>

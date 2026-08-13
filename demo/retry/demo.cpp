@@ -9,8 +9,8 @@
  * - 取消请直接用 std::stop_token / std::stop_source
  */
 
-#include "retry/retry.h"
-#include "time/deadline.h"
+#include "component/retry/retry.h"
+#include "component/time/deadline.h"
 
 #include <chrono>
 #include <iostream>

@@ -8,7 +8,7 @@
  * - scoped_connection RAII；worker_thread + invoke / 定时器
  */
 
-#include "signal_and_slots/signal_and_slots.h"
+#include "component/signal_and_slots/signal_and_slots.h"
 
 #include <atomic>
 #include <chrono>
