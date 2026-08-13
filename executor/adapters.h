@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * Executor 适配器 — ThreadPoolExecutor / EventLoopExecutor
+ * executor 适配器 — thread_pool_executor / event_loop_executor
  *
  * 不拥有后端；move-only 可调用经 shared_ptr 包装以适配 std::function 任务队列。
  */
@@ -35,9 +35,9 @@ void post_copyable_or_shared(Sink&& sink, F&& f) {
  * 包装 thread_pool（非拥有）。
  * post → add_task（已停止时抛）；try_post → try_add_task。
  */
-class ThreadPoolExecutor {
+class thread_pool_executor {
 public:
-    explicit ThreadPoolExecutor(thread_pool& pool) noexcept : pool_(&pool) {}
+    explicit thread_pool_executor(thread_pool& pool) noexcept : pool_(&pool) {}
 
     template <class F>
     void post(F&& f) {
@@ -66,13 +66,13 @@ private:
 };
 
 /**
- * 包装 EventLoop（非拥有）。
- * 未 running 时 post 与 EventLoop 一致：静默丢弃。
+ * 包装 event_loop（非拥有）。
+ * 未 running 时 post 与 event_loop 一致：静默丢弃。
  * try_post：未 running 返回 false，否则 post 并返回 true。
  */
-class EventLoopExecutor {
+class event_loop_executor {
 public:
-    explicit EventLoopExecutor(EventLoop& loop) noexcept : loop_(&loop) {}
+    explicit event_loop_executor(event_loop& loop) noexcept : loop_(&loop) {}
 
     template <class F>
     void post(F&& f) {
@@ -85,25 +85,25 @@ public:
 
     template <class F>
     bool try_post(F&& f) {
-        if (!loop_->isRunning()) {
+        if (!loop_->is_running()) {
             return false;
         }
         post(std::forward<F>(f));
         return true;
     }
 
-    [[nodiscard]] EventLoop* target() const noexcept { return loop_; }
+    [[nodiscard]] event_loop* target() const noexcept { return loop_; }
 
 private:
-    EventLoop* loop_;
+    event_loop* loop_;
 };
 
-[[nodiscard]] inline ThreadPoolExecutor make_executor(thread_pool& pool) noexcept {
-    return ThreadPoolExecutor(pool);
+[[nodiscard]] inline thread_pool_executor make_executor(thread_pool& pool) noexcept {
+    return thread_pool_executor(pool);
 }
 
-[[nodiscard]] inline EventLoopExecutor make_executor(EventLoop& loop) noexcept {
-    return EventLoopExecutor(loop);
+[[nodiscard]] inline event_loop_executor make_executor(event_loop& loop) noexcept {
+    return event_loop_executor(loop);
 }
 
 }  // namespace utils

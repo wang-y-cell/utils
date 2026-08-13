@@ -31,7 +31,7 @@ template <class Sig>
 struct is_any_invocable<any_invocable<Sig>> : std::true_type {};
 
 template <class R, class... Args>
-struct AnyInvocableVTable {
+struct any_invocable_vtable {
     R (*invoke)(void* storage, Args&&... args);
     void (*destroy)(void* storage) noexcept;
     void (*move_to)(void* dst, void* src) noexcept;
@@ -39,7 +39,7 @@ struct AnyInvocableVTable {
 };
 
 template <class F, class R, class... Args>
-struct AnyInvocableOps {
+struct any_invocable_ops {
     static constexpr bool use_sbo =
         sizeof(F) <= any_invocable_sbo_size &&
         alignof(F) <= any_invocable_sbo_align &&
@@ -78,11 +78,11 @@ struct AnyInvocableOps {
         *reinterpret_cast<F**>(src) = nullptr;
     }
 
-    static const AnyInvocableVTable<R, Args...>* table() {
-        static const AnyInvocableVTable<R, Args...> v = use_sbo
-            ? AnyInvocableVTable<R, Args...>{
+    static const any_invocable_vtable<R, Args...>* table() {
+        static const any_invocable_vtable<R, Args...> v = use_sbo
+            ? any_invocable_vtable<R, Args...>{
                   &invoke_local, &destroy_local, &move_local, true}
-            : AnyInvocableVTable<R, Args...>{
+            : any_invocable_vtable<R, Args...>{
                   &invoke_heap, &destroy_heap, &move_heap, false};
         return &v;
     }
@@ -172,9 +172,9 @@ private:
     template <class F>
     void emplace(F&& f) {
         using FD = std::decay_t<F>;
-        using Ops = detail::AnyInvocableOps<FD, R, Args...>;
-        vtable_ = Ops::table();
-        if constexpr (Ops::use_sbo) {
+        using ops = detail::any_invocable_ops<FD, R, Args...>;
+        vtable_ = ops::table();
+        if constexpr (ops::use_sbo) {
             std::construct_at(reinterpret_cast<FD*>(storage()),
                               std::forward<F>(f));
         } else {
@@ -190,7 +190,7 @@ private:
 
     alignas(detail::any_invocable_sbo_align) unsigned char
         buf_[detail::any_invocable_sbo_size]{};
-    const detail::AnyInvocableVTable<R, Args...>* vtable_ = nullptr;
+    const detail::any_invocable_vtable<R, Args...>* vtable_ = nullptr;
 };
 
 template <class R, class... Args>
@@ -250,14 +250,14 @@ public:
     }
 
 private:
-    struct VTable {
+    struct vtable_type {
         R (*invoke)(const void* storage, Args&&... args);
         void (*destroy)(void* storage) noexcept;
         void (*move_to)(void* dst, void* src) noexcept;
     };
 
     template <class F>
-    struct Ops {
+    struct ops {
         static constexpr bool use_sbo =
             sizeof(F) <= detail::any_invocable_sbo_size &&
             alignof(F) <= detail::any_invocable_sbo_align &&
@@ -291,10 +291,10 @@ private:
                 *std::launder(reinterpret_cast<F**>(src));
             *reinterpret_cast<F**>(src) = nullptr;
         }
-        static const VTable* table() {
-            static const VTable v =
-                use_sbo ? VTable{&invoke_local, &destroy_local, &move_local}
-                        : VTable{&invoke_heap, &destroy_heap, &move_heap};
+        static const vtable_type* table() {
+            static const vtable_type v =
+                use_sbo ? vtable_type{&invoke_local, &destroy_local, &move_local}
+                        : vtable_type{&invoke_heap, &destroy_heap, &move_heap};
             return &v;
         }
     };
@@ -310,7 +310,7 @@ private:
     template <class F>
     void emplace(F&& f) {
         using FD = std::decay_t<F>;
-        using O = Ops<FD>;
+        using O = ops<FD>;
         vtable_ = O::table();
         if constexpr (O::use_sbo) {
             std::construct_at(reinterpret_cast<FD*>(storage()),
@@ -328,7 +328,7 @@ private:
 
     alignas(detail::any_invocable_sbo_align) unsigned char
         buf_[detail::any_invocable_sbo_size]{};
-    const VTable* vtable_ = nullptr;
+    const vtable_type* vtable_ = nullptr;
 };
 
 template <class R, class... Args>
@@ -381,14 +381,14 @@ public:
     }
 
 private:
-    struct VTable {
+    struct vtable_type {
         R (*invoke)(void* storage, Args&&... args) noexcept;
         void (*destroy)(void* storage) noexcept;
         void (*move_to)(void* dst, void* src) noexcept;
     };
 
     template <class F>
-    struct Ops {
+    struct ops {
         static constexpr bool use_sbo =
             sizeof(F) <= detail::any_invocable_sbo_size &&
             alignof(F) <= detail::any_invocable_sbo_align &&
@@ -421,10 +421,10 @@ private:
                 *std::launder(reinterpret_cast<F**>(src));
             *reinterpret_cast<F**>(src) = nullptr;
         }
-        static const VTable* table() {
-            static const VTable v =
-                use_sbo ? VTable{&invoke_local, &destroy_local, &move_local}
-                        : VTable{&invoke_heap, &destroy_heap, &move_heap};
+        static const vtable_type* table() {
+            static const vtable_type v =
+                use_sbo ? vtable_type{&invoke_local, &destroy_local, &move_local}
+                        : vtable_type{&invoke_heap, &destroy_heap, &move_heap};
             return &v;
         }
     };
@@ -440,7 +440,7 @@ private:
     template <class F>
     void emplace(F&& f) {
         using FD = std::decay_t<F>;
-        using O = Ops<FD>;
+        using O = ops<FD>;
         vtable_ = O::table();
         if constexpr (O::use_sbo) {
             std::construct_at(reinterpret_cast<FD*>(storage()),
@@ -455,7 +455,7 @@ private:
 
     alignas(detail::any_invocable_sbo_align) unsigned char
         buf_[detail::any_invocable_sbo_size]{};
-    const VTable* vtable_ = nullptr;
+    const vtable_type* vtable_ = nullptr;
 };
 
 }  // namespace utils

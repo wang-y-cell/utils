@@ -1,25 +1,25 @@
 #pragma once
 
 /**
- * Expected<T, E> / Result<T> — 错误传递，少用异常当控制流（C++20 header-only）
+ * expected<T, E> / result<T> — 错误传递，少用异常当控制流（C++20 header-only）
  *
  * 详细可运行教程：demo/result/expected_demo.cpp
  *   cmake --build build --target demo_expected
  *
  * 速览：
- *   Result<int> r = result_ok(42);
+ *   result<int> r = result_ok(42);
  *   if (!r) { use(r.error()); } else { use(*r); }
- *   auto x = parse().and_then([](int n) -> Result<int> { return result_ok(n * 2); });
+ *   auto x = parse().and_then([](int n) -> result<int> { return result_ok(n * 2); });
  *
  * 业务失败请 return result_err / unexpected，不要用异常当控制流。
- * value() 在无值时抛 BadExpectedAccess，仅作未检查访问的兜底。
+ * value() 在无值时抛 bad_expected_access，仅作未检查访问的兜底。
  *
  * 结构概览：
- *   Unexpected<E>           — 显式错误包装，避免与 T 构造歧义
- *   detail::ExpectedStorage — Expected<T,E> 底层：二选一存 T 或 E
- *   detail::ExpectedVoidStorage — Expected<void,E> 底层：成功无载荷
- *   Expected<T,E> / Expected<void,E> — 对外 API
- *   ok / err / Result / result_ok / result_err — 工厂与别名
+ *   unexpected<E>           — 显式错误包装，避免与 T 构造歧义
+ *   detail::expected_storage — expected<T,E> 底层：二选一存 T 或 E
+ *   detail::expected_void_storage — expected<void,E> 底层：成功无载荷
+ *   expected<T,E> / expected<void,E> — 对外 API
+ *   ok / err / result / result_ok / result_err — 工厂与别名
  */
 
 #include <cassert>
@@ -36,41 +36,41 @@ namespace utils {
 struct unexpect_t {
     explicit unexpect_t() = default;
 };
-/** @brief unexpect 标签实例，用于 Expected(unexpect, ...) */
+/** @brief unexpect 标签实例，用于 expected(unexpect, ...) */
 inline constexpr unexpect_t unexpect{};
 
 /**
- * @brief 对空 Expected 调用 value() 时抛出
+ * @brief 对空 expected 调用 value() 时抛出
  * @note 属编程错误兜底，不是业务错误通道
  */
-class BadExpectedAccess : public std::exception {
+class bad_expected_access : public std::exception {
 public:
     const char* what() const noexcept override {
-        return "BadExpectedAccess: Expected has no value";
+        return "bad_expected_access: expected has no value";
     }
 };
 
 /**
- * @brief 显式错误包装，构造 Expected 失败态时用，避免与 T 的值构造混淆
+ * @brief 显式错误包装，构造 expected 失败态时用，避免与 T 的值构造混淆
  * @tparam E 错误类型（不可为 void）
  */
 template <class E>
-class Unexpected {
+class unexpected {
 public:
-    static_assert(!std::is_void_v<E>, "Unexpected<void> is ill-formed");
+    static_assert(!std::is_void_v<E>, "unexpected<void> is ill-formed");
 
-    constexpr Unexpected(const Unexpected&) = default;
-    constexpr Unexpected(Unexpected&&) = default;
-    constexpr Unexpected& operator=(const Unexpected&) = default;
-    constexpr Unexpected& operator=(Unexpected&&) = default;
+    constexpr unexpected(const unexpected&) = default;
+    constexpr unexpected(unexpected&&) = default;
+    constexpr unexpected& operator=(const unexpected&) = default;
+    constexpr unexpected& operator=(unexpected&&) = default;
 
     /** @brief 从可转为 E 的对象构造错误包装 */
     template <class Err = E,
               std::enable_if_t<
-                  !std::is_same_v<std::remove_cvref_t<Err>, Unexpected> &&
+                  !std::is_same_v<std::remove_cvref_t<Err>, unexpected> &&
                       std::is_constructible_v<E, Err>,
                   int> = 0>
-    constexpr explicit Unexpected(Err&& e) noexcept(
+    constexpr explicit unexpected(Err&& e) noexcept(
         std::is_nothrow_constructible_v<E, Err>)
         : error_(std::forward<Err>(e)) {}
 
@@ -84,53 +84,46 @@ private:
     E error_;  ///< 错误载荷（如 std::error_code、自定义类型等）
 };
 
-/** @brief CTAD：Unexpected(x) 自动推导为 Unexpected<decay_t<decltype(x)>> */
+/** @brief CTAD：unexpected(x) 自动推导为 unexpected<decay_t<decltype(x)>> */
 template <class E>
-Unexpected(E) -> Unexpected<E>;
+unexpected(E) -> unexpected<E>;
 
-/**
- * @brief 工厂：把任意错误值包成 Unexpected
- * @note 常用写法 return unexpected(ec); 再隐式转为 Expected/Result
- */
-template <class E>
-[[nodiscard]] constexpr Unexpected<std::decay_t<E>> unexpected(E&& e) {
-    return Unexpected<std::decay_t<E>>(std::forward<E>(e));
-}
+/** @note 常用写法 return unexpected(ec);（靠 CTAD，与 std::unexpected 一致） */
 
 namespace detail {
 
-/** @brief 类型特征：判断是否为 Unexpected 特化 */
+/** @brief 类型特征：判断是否为 unexpected 特化 */
 template <class U>
 struct is_unexpected : std::false_type {};
 template <class G>
-struct is_unexpected<Unexpected<G>> : std::true_type {};
+struct is_unexpected<unexpected<G>> : std::true_type {};
 template <class U>
 inline constexpr bool is_unexpected_v = is_unexpected<U>::value;
 
 /**
- * @brief Expected<T,E> 的底层存储：同一缓冲区二选一存放成功值 T 或错误 E
+ * @brief expected<T,E> 的底层存储：同一缓冲区二选一存放成功值 T 或错误 E
  * @note 不提供默认构造；必须用 in_place（存 T）或 unexpect（存 E）构造
  */
 template <class T, class E>
-class ExpectedStorage {
+class expected_storage {
 public:
-    ExpectedStorage() = delete;  ///< 禁止无参构造，避免未初始化缓冲
+    expected_storage() = delete;  ///< 禁止无参构造，避免未初始化缓冲
 
     /** @brief 在缓冲中 placement-new 构造成功值 T */
     template <class... Args>
-    explicit ExpectedStorage(std::in_place_t, Args&&... args)
+    explicit expected_storage(std::in_place_t, Args&&... args)
         : has_(true) {
         std::construct_at(std::addressof(as_value()), std::forward<Args>(args)...);
     }
 
     /** @brief 在缓冲中 placement-new 构造错误值 E */
     template <class... Args>
-    explicit ExpectedStorage(unexpect_t, Args&&... args) : has_(false) {
+    explicit expected_storage(unexpect_t, Args&&... args) : has_(false) {
         std::construct_at(std::addressof(as_error()), std::forward<Args>(args)...);
     }
 
     /** @brief 拷贝构造：按 other 状态拷贝 T 或 E */
-    ExpectedStorage(const ExpectedStorage& other) : has_(other.has_) {
+    expected_storage(const expected_storage& other) : has_(other.has_) {
         if (other.has_) {
             std::construct_at(std::addressof(as_value()), other.as_value());
         } else {
@@ -139,7 +132,7 @@ public:
     }
 
     /** @brief 移动构造：按 other 状态移动 T 或 E */
-    ExpectedStorage(ExpectedStorage&& other) noexcept(
+    expected_storage(expected_storage&& other) noexcept(
         std::is_nothrow_move_constructible_v<T> &&
         std::is_nothrow_move_constructible_v<E>)
         : has_(other.has_) {
@@ -152,10 +145,10 @@ public:
         }
     }
 
-    ~ExpectedStorage() { destroy(); }
+    ~expected_storage() { destroy(); }
 
-    ExpectedStorage& operator=(const ExpectedStorage&) = delete;
-    ExpectedStorage& operator=(ExpectedStorage&&) = delete;
+    expected_storage& operator=(const expected_storage&) = delete;
+    expected_storage& operator=(expected_storage&&) = delete;
 
     /** @brief true = 当前存的是 T；false = 当前存的是 E */
     [[nodiscard]] bool has_value() const noexcept { return has_; }
@@ -218,9 +211,9 @@ public:
 
     /**
      * @brief 从 other 赋值到 *this（同态直接赋；异态先 destroy 再 construct）
-     * @note 供外层 Expected::operator= 使用
+     * @note 供外层 expected::operator= 使用
      */
-    void assign_from(const ExpectedStorage& other) {
+    void assign_from(const expected_storage& other) {
         if (has_ && other.has_) {
             as_value() = other.as_value();
         } else if (!has_ && !other.has_) {
@@ -235,7 +228,7 @@ public:
     }
 
     /** @brief 移动赋值版 assign_from */
-    void assign_from(ExpectedStorage&& other) {
+    void assign_from(expected_storage&& other) {
         if (has_ && other.has_) {
             as_value() = std::move(other.as_value());
         } else if (!has_ && !other.has_) {
@@ -260,30 +253,30 @@ private:
 };
 
 /**
- * @brief Expected<void,E> 的底层存储：成功无载荷，失败时才在缓冲中存 E
+ * @brief expected<void,E> 的底层存储：成功无载荷，失败时才在缓冲中存 E
  * @note has_==true 表示成功（buf_ 无对象）；has_==false 表示失败（buf_ 中有 E）
  */
 template <class E>
-class ExpectedVoidStorage {
+class expected_void_storage {
 public:
     /** @brief 默认构造成功态 */
-    ExpectedVoidStorage() noexcept : has_(true) {}
+    expected_void_storage() noexcept : has_(true) {}
 
     /** @brief 构造成失败态，并 placement-new 错误 E */
     template <class... Args>
-    explicit ExpectedVoidStorage(unexpect_t, Args&&... args) : has_(false) {
+    explicit expected_void_storage(unexpect_t, Args&&... args) : has_(false) {
         std::construct_at(std::addressof(as_error()), std::forward<Args>(args)...);
     }
 
     /** @brief 拷贝：仅当 other 失败时拷贝 E */
-    ExpectedVoidStorage(const ExpectedVoidStorage& other) : has_(other.has_) {
+    expected_void_storage(const expected_void_storage& other) : has_(other.has_) {
         if (!other.has_) {
             std::construct_at(std::addressof(as_error()), other.as_error());
         }
     }
 
     /** @brief 移动：仅当 other 失败时移动 E */
-    ExpectedVoidStorage(ExpectedVoidStorage&& other) noexcept(
+    expected_void_storage(expected_void_storage&& other) noexcept(
         std::is_nothrow_move_constructible_v<E>)
         : has_(other.has_) {
         if (!other.has_) {
@@ -293,14 +286,14 @@ public:
     }
 
     /** @brief 析构：仅失败态需要销毁 E */
-    ~ExpectedVoidStorage() {
+    ~expected_void_storage() {
         if (!has_) {
             std::destroy_at(std::addressof(as_error()));
         }
     }
 
-    ExpectedVoidStorage& operator=(const ExpectedVoidStorage&) = delete;
-    ExpectedVoidStorage& operator=(ExpectedVoidStorage&&) = delete;
+    expected_void_storage& operator=(const expected_void_storage&) = delete;
+    expected_void_storage& operator=(expected_void_storage&&) = delete;
 
     /** @brief true=成功（无载荷）；false=失败（有错误） */
     [[nodiscard]] bool has_value() const noexcept { return has_; }
@@ -319,7 +312,7 @@ public:
     /**
      * @brief 赋值：处理 成功↔成功 / 失败↔失败 / 成功→失败 / 失败→成功
      */
-    void assign_from(const ExpectedVoidStorage& other) {
+    void assign_from(const expected_void_storage& other) {
         if (has_ && other.has_) {
             return;
         }
@@ -337,7 +330,7 @@ public:
     }
 
     /** @brief 移动赋值版 assign_from */
-    void assign_from(ExpectedVoidStorage&& other) {
+    void assign_from(expected_void_storage&& other) {
         if (has_ && other.has_) {
             return;
         }
@@ -365,7 +358,7 @@ private:
 /**
  * @brief 要么持有成功值 T，要么持有错误 E（同一时间仅一种状态）
  * @tparam T 成功值类型
- * @tparam E 错误类型（不可为 void；void 成功见 Expected<void,E>）
+ * @tparam E 错误类型（不可为 void；void 成功见 expected<void,E>）
  *
  * 日常推荐：
  *   - 判断：has_value() / if (r)
@@ -373,7 +366,7 @@ private:
  *   - 链式：and_then / transform / or_else / transform_error
  */
 template <class T, class E>
-class Expected {
+class expected {
     static_assert(!std::is_same_v<std::remove_cv_t<E>, void>);
     static_assert(!std::is_same_v<std::remove_cv_t<T>, unexpect_t>);
     static_assert(!std::is_same_v<std::remove_cv_t<T>, std::in_place_t>);
@@ -381,15 +374,15 @@ class Expected {
 public:
     using value_type = T;
     using error_type = E;
-    using unexpected_type = Unexpected<E>;
+    using unexpected_type = unexpected<E>;
 
     /** @brief 默认构造成功态（要求 T 可默认构造） */
     template <class U = T,
               std::enable_if_t<std::is_default_constructible_v<U>, int> = 0>
-    Expected() : storage_(std::in_place) {}
+    expected() : storage_(std::in_place) {}
 
-    Expected(const Expected&) = default;
-    Expected(Expected&&) = default;
+    expected(const expected&) = default;
+    expected(expected&&) = default;
 
     /**
      * @brief 从可转为 T 的值构造成功态
@@ -397,36 +390,36 @@ public:
      */
     template <class U = T,
               std::enable_if_t<
-                  !std::is_same_v<std::remove_cvref_t<U>, Expected> &&
+                  !std::is_same_v<std::remove_cvref_t<U>, expected> &&
                       !std::is_same_v<std::remove_cvref_t<U>, std::in_place_t> &&
                       !detail::is_unexpected_v<std::remove_cvref_t<U>> &&
                       std::is_constructible_v<T, U>,
                   int> = 0>
-    Expected(U&& v) : storage_(std::in_place, std::forward<U>(v)) {}
+    expected(U&& v) : storage_(std::in_place, std::forward<U>(v)) {}
 
-    /** @brief 从 Unexpected 构造失败态（拷贝错误） */
+    /** @brief 从 unexpected 构造失败态（拷贝错误） */
     template <class G,
               std::enable_if_t<std::is_constructible_v<E, const G&>, int> = 0>
-    Expected(const Unexpected<G>& u) : storage_(unexpect, u.error()) {}
+    expected(const unexpected<G>& u) : storage_(unexpect, u.error()) {}
 
-    /** @brief 从 Unexpected 构造失败态（移动错误） */
+    /** @brief 从 unexpected 构造失败态（移动错误） */
     template <class G, std::enable_if_t<std::is_constructible_v<E, G>, int> = 0>
-    Expected(Unexpected<G>&& u) : storage_(unexpect, std::move(u.error())) {}
+    expected(unexpected<G>&& u) : storage_(unexpect, std::move(u.error())) {}
 
     /** @brief 原位构造成功值 T(args...) */
     template <class... Args,
               std::enable_if_t<std::is_constructible_v<T, Args...>, int> = 0>
-    explicit Expected(std::in_place_t, Args&&... args)
+    explicit expected(std::in_place_t, Args&&... args)
         : storage_(std::in_place, std::forward<Args>(args)...) {}
 
     /** @brief 原位构造错误值 E(args...) */
     template <class... Args,
               std::enable_if_t<std::is_constructible_v<E, Args...>, int> = 0>
-    explicit Expected(unexpect_t, Args&&... args)
+    explicit expected(unexpect_t, Args&&... args)
         : storage_(unexpect, std::forward<Args>(args)...) {}
 
     /** @brief 拷贝赋值 */
-    Expected& operator=(const Expected& other) {
+    expected& operator=(const expected& other) {
         if (this != &other) {
             storage_.assign_from(other.storage_);
         }
@@ -434,7 +427,7 @@ public:
     }
 
     /** @brief 移动赋值 */
-    Expected& operator=(Expected&& other) noexcept(
+    expected& operator=(expected&& other) noexcept(
         std::is_nothrow_move_assignable_v<T> &&
         std::is_nothrow_move_constructible_v<T> &&
         std::is_nothrow_move_assignable_v<E> &&
@@ -451,26 +444,26 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
     /**
-     * @brief 取成功值；无值时抛 BadExpectedAccess（兜底，非推荐主路径）
+     * @brief 取成功值；无值时抛 bad_expected_access（兜底，非推荐主路径）
      * @note 日常请先 if (r) 或用 value_or / *
      */
     T& value() & {
         if (!has_value()) {
-            throw BadExpectedAccess{};
+            throw bad_expected_access{};
         }
         return storage_.as_value();
     }
     /** @brief const 版 value() */
     const T& value() const& {
         if (!has_value()) {
-            throw BadExpectedAccess{};
+            throw bad_expected_access{};
         }
         return storage_.as_value();
     }
     /** @brief 右值版 value()，可移动取出成功值 */
     T&& value() && {
         if (!has_value()) {
-            throw BadExpectedAccess{};
+            throw bad_expected_access{};
         }
         return std::move(storage_.as_value());
     }
@@ -534,8 +527,8 @@ public:
     }
 
     /**
-     * @brief 成功则调用 f(值)，f 须再返回 Expected/Result；失败则错误原样传递（短路）
-     * @param f 接受 T& 并返回某种 Expected 的可调用对象
+     * @brief 成功则调用 f(值)，f 须再返回 expected/result；失败则错误原样传递（短路）
+     * @param f 接受 T& 并返回某种 expected 的可调用对象
      */
     template <class F>
     auto and_then(F&& f) & {
@@ -572,14 +565,14 @@ public:
     auto transform(F&& f) & {
         using U = std::remove_cv_t<std::invoke_result_t<F, T&>>;
         if constexpr (std::is_void_v<U>) {
-            using R = Expected<void, E>;
+            using R = expected<void, E>;
             if (has_value()) {
                 std::invoke(std::forward<F>(f), storage_.as_value());
                 return R{};
             }
             return R(unexpect, storage_.as_error());
         } else {
-            using R = Expected<U, E>;
+            using R = expected<U, E>;
             if (has_value()) {
                 return R(std::in_place,
                          std::invoke(std::forward<F>(f), storage_.as_value()));
@@ -592,14 +585,14 @@ public:
     auto transform(F&& f) const& {
         using U = std::remove_cv_t<std::invoke_result_t<F, const T&>>;
         if constexpr (std::is_void_v<U>) {
-            using R = Expected<void, E>;
+            using R = expected<void, E>;
             if (has_value()) {
                 std::invoke(std::forward<F>(f), storage_.as_value());
                 return R{};
             }
             return R(unexpect, storage_.as_error());
         } else {
-            using R = Expected<U, E>;
+            using R = expected<U, E>;
             if (has_value()) {
                 return R(std::in_place,
                          std::invoke(std::forward<F>(f), storage_.as_value()));
@@ -612,14 +605,14 @@ public:
     auto transform(F&& f) && {
         using U = std::remove_cv_t<std::invoke_result_t<F, T&&>>;
         if constexpr (std::is_void_v<U>) {
-            using R = Expected<void, E>;
+            using R = expected<void, E>;
             if (has_value()) {
                 std::invoke(std::forward<F>(f), std::move(storage_.as_value()));
                 return R{};
             }
             return R(unexpect, std::move(storage_.as_error()));
         } else {
-            using R = Expected<U, E>;
+            using R = expected<U, E>;
             if (has_value()) {
                 return R(std::in_place,
                          std::invoke(std::forward<F>(f),
@@ -631,7 +624,7 @@ public:
 
     /**
      * @brief 失败才调用 f(错误) 做补救；成功则把原值包进 f 的返回类型并返回
-     * @param f 接受 E& 并返回某种 Expected 的可调用对象
+     * @param f 接受 E& 并返回某种 expected 的可调用对象
      */
     template <class F>
     auto or_else(F&& f) & {
@@ -663,12 +656,12 @@ public:
     /**
      * @brief 失败时用 f 映射错误类型/内容；成功则值原样保留
      * @param f 接受 E&，返回新的错误类型 G
-     * @return Expected<T, G>
+     * @return expected<T, G>
      */
     template <class F>
     auto transform_error(F&& f) & {
         using G = std::remove_cv_t<std::invoke_result_t<F, E&>>;
-        using R = Expected<T, G>;
+        using R = expected<T, G>;
         if (has_value()) {
             return R(std::in_place, storage_.as_value());
         }
@@ -678,7 +671,7 @@ public:
     template <class F>
     auto transform_error(F&& f) const& {
         using G = std::remove_cv_t<std::invoke_result_t<F, const E&>>;
-        using R = Expected<T, G>;
+        using R = expected<T, G>;
         if (has_value()) {
             return R(std::in_place, storage_.as_value());
         }
@@ -688,7 +681,7 @@ public:
     template <class F>
     auto transform_error(F&& f) && {
         using G = std::remove_cv_t<std::invoke_result_t<F, E&&>>;
-        using R = Expected<T, G>;
+        using R = expected<T, G>;
         if (has_value()) {
             return R(std::in_place, std::move(storage_.as_value()));
         }
@@ -697,53 +690,53 @@ public:
     }
 
 private:
-    detail::ExpectedStorage<T, E> storage_;  ///< 实际存放 T 或 E
+    detail::expected_storage<T, E> storage_;  ///< 实际存放 T 或 E
 };
 
 /**
- * @brief Expected 的 void 特化：成功无载荷，失败只携带错误 E
+ * @brief expected 的 void 特化：成功无载荷，失败只携带错误 E
  * @tparam E 错误类型
- * @note 适合“只关心成没成功”的操作，如 ensure_ready() -> Result<void>
+ * @note 适合“只关心成没成功”的操作，如 ensure_ready() -> result<void>
  */
 template <class E>
-class Expected<void, E> {
+class expected<void, E> {
     static_assert(!std::is_same_v<std::remove_cv_t<E>, void>);
 
 public:
     using value_type = void;
     using error_type = E;
-    using unexpected_type = Unexpected<E>;
+    using unexpected_type = unexpected<E>;
 
     /** @brief 默认构造成功态 */
-    Expected() noexcept = default;
-    Expected(const Expected&) = default;
-    Expected(Expected&&) = default;
+    expected() noexcept = default;
+    expected(const expected&) = default;
+    expected(expected&&) = default;
 
-    /** @brief 从 Unexpected 构造失败态 */
+    /** @brief 从 unexpected 构造失败态 */
     template <class G,
               std::enable_if_t<std::is_constructible_v<E, const G&>, int> = 0>
-    Expected(const Unexpected<G>& u) : storage_(unexpect, u.error()) {}
+    expected(const unexpected<G>& u) : storage_(unexpect, u.error()) {}
 
     template <class G, std::enable_if_t<std::is_constructible_v<E, G>, int> = 0>
-    Expected(Unexpected<G>&& u) : storage_(unexpect, std::move(u.error())) {}
+    expected(unexpected<G>&& u) : storage_(unexpect, std::move(u.error())) {}
 
     /** @brief 显式标记成功（无载荷） */
-    explicit Expected(std::in_place_t) noexcept : storage_() {}
+    explicit expected(std::in_place_t) noexcept : storage_() {}
 
     /** @brief 原位构造错误 E(args...) */
     template <class... Args,
               std::enable_if_t<std::is_constructible_v<E, Args...>, int> = 0>
-    explicit Expected(unexpect_t, Args&&... args)
+    explicit expected(unexpect_t, Args&&... args)
         : storage_(unexpect, std::forward<Args>(args)...) {}
 
-    Expected& operator=(const Expected& other) {
+    expected& operator=(const expected& other) {
         if (this != &other) {
             storage_.assign_from(other.storage_);
         }
         return *this;
     }
 
-    Expected& operator=(Expected&& other) noexcept(
+    expected& operator=(expected&& other) noexcept(
         std::is_nothrow_move_assignable_v<E> &&
         std::is_nothrow_move_constructible_v<E>) {
         if (this != &other) {
@@ -757,12 +750,12 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
     /**
-     * @brief 成功则无操作；失败抛 BadExpectedAccess
+     * @brief 成功则无操作；失败抛 bad_expected_access
      * @note void 特化无返回值，仅用于检查
      */
     void value() const {
         if (!has_value()) {
-            throw BadExpectedAccess{};
+            throw bad_expected_access{};
         }
     }
 
@@ -826,14 +819,14 @@ public:
     auto transform(F&& f) & {
         using U = std::remove_cv_t<std::invoke_result_t<F>>;
         if constexpr (std::is_void_v<U>) {
-            using R = Expected<void, E>;
+            using R = expected<void, E>;
             if (has_value()) {
                 std::invoke(std::forward<F>(f));
                 return R{};
             }
             return R(unexpect, storage_.as_error());
         } else {
-            using R = Expected<U, E>;
+            using R = expected<U, E>;
             if (has_value()) {
                 return R(std::in_place, std::invoke(std::forward<F>(f)));
             }
@@ -844,14 +837,14 @@ public:
     auto transform(F&& f) const& {
         using U = std::remove_cv_t<std::invoke_result_t<F>>;
         if constexpr (std::is_void_v<U>) {
-            using R = Expected<void, E>;
+            using R = expected<void, E>;
             if (has_value()) {
                 std::invoke(std::forward<F>(f));
                 return R{};
             }
             return R(unexpect, storage_.as_error());
         } else {
-            using R = Expected<U, E>;
+            using R = expected<U, E>;
             if (has_value()) {
                 return R(std::in_place, std::invoke(std::forward<F>(f)));
             }
@@ -862,14 +855,14 @@ public:
     auto transform(F&& f) && {
         using U = std::remove_cv_t<std::invoke_result_t<F>>;
         if constexpr (std::is_void_v<U>) {
-            using R = Expected<void, E>;
+            using R = expected<void, E>;
             if (has_value()) {
                 std::invoke(std::forward<F>(f));
                 return R{};
             }
             return R(unexpect, std::move(storage_.as_error()));
         } else {
-            using R = Expected<U, E>;
+            using R = expected<U, E>;
             if (has_value()) {
                 return R(std::in_place, std::invoke(std::forward<F>(f)));
             }
@@ -904,12 +897,12 @@ public:
     }
 
     /**
-     * @brief 失败时映射错误；成功保持 Expected<void, G> 成功态
+     * @brief 失败时映射错误；成功保持 expected<void, G> 成功态
      */
     template <class F>
     auto transform_error(F&& f) & {
         using G = std::remove_cv_t<std::invoke_result_t<F, E&>>;
-        using R = Expected<void, G>;
+        using R = expected<void, G>;
         if (has_value()) {
             return R{};
         }
@@ -918,7 +911,7 @@ public:
     template <class F>
     auto transform_error(F&& f) const& {
         using G = std::remove_cv_t<std::invoke_result_t<F, const E&>>;
-        using R = Expected<void, G>;
+        using R = expected<void, G>;
         if (has_value()) {
             return R{};
         }
@@ -927,7 +920,7 @@ public:
     template <class F>
     auto transform_error(F&& f) && {
         using G = std::remove_cv_t<std::invoke_result_t<F, E&&>>;
-        using R = Expected<void, G>;
+        using R = expected<void, G>;
         if (has_value()) {
             return R{};
         }
@@ -936,32 +929,32 @@ public:
     }
 
 private:
-    detail::ExpectedVoidStorage<E> storage_;
+    detail::expected_void_storage<E> storage_;
 };
 
 // ---------------------------------------------------------------------------
-// 工厂函数与 Result 别名
+// 工厂函数与 result 别名
 // ---------------------------------------------------------------------------
 
 /**
- * @brief 构造成功的 Expected<decay_t<T>, E>
+ * @brief 构造成功的 expected<decay_t<T>, E>
  * @param value 成功值
  */
 template <class T, class E = std::error_code>
-[[nodiscard]] Expected<std::decay_t<T>, E> ok(T&& value) {
-    return Expected<std::decay_t<T>, E>(std::in_place, std::forward<T>(value));
+[[nodiscard]] expected<std::decay_t<T>, E> ok(T&& value) {
+    return expected<std::decay_t<T>, E>(std::in_place, std::forward<T>(value));
 }
 
 /**
- * @brief 构造成功的 Expected<void, E>（无载荷）
+ * @brief 构造成功的 expected<void, E>（无载荷）
  */
 template <class E = std::error_code>
-[[nodiscard]] Expected<void, E> ok() {
-    return Expected<void, E>(std::in_place);
+[[nodiscard]] expected<void, E> ok() {
+    return expected<void, E>(std::in_place);
 }
 
 /**
- * @brief 构造 Unexpected（再赋给 Expected/Result 即失败态）
+ * @brief 构造 unexpected（再赋给 expected/result 即失败态）
  * @param e 错误对象
  */
 template <class E>
@@ -973,23 +966,23 @@ template <class E>
  * @brief 常用别名：错误类型固定为 std::error_code
  */
 template <class T>
-using Result = Expected<T, std::error_code>;
+using result = expected<T, std::error_code>;
 
-/** @brief 成功的 Result<void> */
-[[nodiscard]] inline Result<void> result_ok() { return ok<>(); }
+/** @brief 成功的 result<void> */
+[[nodiscard]] inline result<void> result_ok() { return ok<>(); }
 
 /**
- * @brief 成功的 Result<T>
+ * @brief 成功的 result<T>
  * @param value 成功值
  */
 template <class T>
-[[nodiscard]] inline Result<std::decay_t<T>> result_ok(T&& value) {
+[[nodiscard]] inline result<std::decay_t<T>> result_ok(T&& value) {
     return ok<T, std::error_code>(std::forward<T>(value));
 }
 
 /**
- * @brief 失败：从 std::error_code 构造 Unexpected
- * @note 需赋给 Result/Expected 才成为完整失败结果，例如 Result<int> r = result_err(ec);
+ * @brief 失败：从 std::error_code 构造 unexpected
+ * @note 需赋给 result/expected 才成为完整失败结果，例如 result<int> r = result_err(ec);
  */
 [[nodiscard]] inline auto result_err(std::error_code ec) {
     return unexpected(ec);

@@ -3,8 +3,8 @@
 /**
  * Logging facade — 可替换后端（C++20）
  *
- *   utils::log::set_backend(std::make_shared<utils::log::StreamBackend>());
- *   utils::log::set_level(utils::log::Level::Info);
+ *   utils::log::set_backend(std::make_shared<utils::log::stream_backend>());
+ *   utils::log::set_level(utils::log::level::info);
  *   utils::log::info("port={}", 8080);
  */
 
@@ -19,47 +19,47 @@
 
 namespace utils::log {
 
-enum class Level {
-    Trace = 0,
-    Debug = 1,
-    Info = 2,
-    Warn = 3,
-    Error = 4,
-    Off = 5
+enum class level {
+    trace = 0,
+    debug = 1,
+    info = 2,
+    warn = 3,
+    error = 4,
+    off = 5
 };
 
-class Backend {
+class backend {
 public:
-    virtual ~Backend() = default;
-    virtual void log(Level level, std::string_view message) = 0;
+    virtual ~backend() = default;
+    virtual void log(level lv, std::string_view message) = 0;
 };
 
-class NullBackend : public Backend {
+class null_backend : public backend {
 public:
-    void log(Level, std::string_view) override {}
+    void log(level, std::string_view) override {}
 };
 
-class StreamBackend : public Backend {
+class stream_backend : public backend {
 public:
-    explicit StreamBackend(std::ostream& os = std::cerr) : os_(&os) {}
+    explicit stream_backend(std::ostream& os = std::cerr) : os_(&os) {}
 
-    void log(Level level, std::string_view message) override {
+    void log(level lv, std::string_view message) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        *os_ << '[' << level_name(level) << "] " << message << '\n';
+        *os_ << '[' << level_name(lv) << "] " << message << '\n';
     }
 
 private:
-    static const char* level_name(Level level) {
-        switch (level) {
-            case Level::Trace:
+    static const char* level_name(level lv) {
+        switch (lv) {
+            case level::trace:
                 return "TRACE";
-            case Level::Debug:
+            case level::debug:
                 return "DEBUG";
-            case Level::Info:
+            case level::info:
                 return "INFO";
-            case Level::Warn:
+            case level::warn:
                 return "WARN";
-            case Level::Error:
+            case level::error:
                 return "ERROR";
             default:
                 return "OFF";
@@ -72,13 +72,13 @@ private:
 
 namespace detail {
 
-inline std::shared_ptr<Backend>& backend_slot() {
-    static std::shared_ptr<Backend> b = std::make_shared<StreamBackend>();
+inline std::shared_ptr<backend>& backend_slot() {
+    static std::shared_ptr<backend> b = std::make_shared<stream_backend>();
     return b;
 }
 
-inline Level& level_slot() {
-    static Level lv = Level::Info;
+inline level& level_slot() {
+    static level lv = level::info;
     return lv;
 }
 
@@ -89,39 +89,39 @@ inline std::mutex& meta_mutex() {
 
 }  // namespace detail
 
-inline void set_backend(std::shared_ptr<Backend> backend) {
+inline void set_backend(std::shared_ptr<backend> b) {
     std::lock_guard<std::mutex> lock(detail::meta_mutex());
     detail::backend_slot() =
-        backend ? std::move(backend) : std::make_shared<NullBackend>();
+        b ? std::move(b) : std::make_shared<null_backend>();
 }
 
-inline void set_level(Level level) {
+inline void set_level(level lv) {
     std::lock_guard<std::mutex> lock(detail::meta_mutex());
-    detail::level_slot() = level;
+    detail::level_slot() = lv;
 }
 
-[[nodiscard]] inline Level level() {
+[[nodiscard]] inline level get_level() {
     std::lock_guard<std::mutex> lock(detail::meta_mutex());
     return detail::level_slot();
 }
 
-inline void write(Level lv, std::string_view message) {
-    std::shared_ptr<Backend> b;
-    Level min_lv;
+inline void write(level lv, std::string_view message) {
+    std::shared_ptr<backend> b;
+    level min_lv;
     {
         std::lock_guard<std::mutex> lock(detail::meta_mutex());
         min_lv = detail::level_slot();
         b = detail::backend_slot();
     }
-    if (!b || lv < min_lv || min_lv == Level::Off) {
+    if (!b || lv < min_lv || min_lv == level::off) {
         return;
     }
     b->log(lv, message);
 }
 
 template <class... Args>
-void log(Level lv, std::format_string<Args...> fmt, Args&&... args) {
-    if (lv < level() || level() == Level::Off) {
+void log(level lv, std::format_string<Args...> fmt, Args&&... args) {
+    if (lv < get_level() || get_level() == level::off) {
         return;
     }
     write(lv, std::format(fmt, std::forward<Args>(args)...));
@@ -129,27 +129,27 @@ void log(Level lv, std::format_string<Args...> fmt, Args&&... args) {
 
 template <class... Args>
 void trace(std::format_string<Args...> fmt, Args&&... args) {
-    log(Level::Trace, fmt, std::forward<Args>(args)...);
+    log(level::trace, fmt, std::forward<Args>(args)...);
 }
 
 template <class... Args>
 void debug(std::format_string<Args...> fmt, Args&&... args) {
-    log(Level::Debug, fmt, std::forward<Args>(args)...);
+    log(level::debug, fmt, std::forward<Args>(args)...);
 }
 
 template <class... Args>
 void info(std::format_string<Args...> fmt, Args&&... args) {
-    log(Level::Info, fmt, std::forward<Args>(args)...);
+    log(level::info, fmt, std::forward<Args>(args)...);
 }
 
 template <class... Args>
 void warn(std::format_string<Args...> fmt, Args&&... args) {
-    log(Level::Warn, fmt, std::forward<Args>(args)...);
+    log(level::warn, fmt, std::forward<Args>(args)...);
 }
 
 template <class... Args>
 void error(std::format_string<Args...> fmt, Args&&... args) {
-    log(Level::Error, fmt, std::forward<Args>(args)...);
+    log(level::error, fmt, std::forward<Args>(args)...);
 }
 
 }  // namespace utils::log

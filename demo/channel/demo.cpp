@@ -1,5 +1,5 @@
 /**
- * Channel 用法演示
+ * channel 用法演示
  * 编译: cmake --build build --target demo_channel
  *
  * 要点:
@@ -20,13 +20,13 @@ using namespace std::chrono_literals;
 
 int main() {
     std::cout << "=== 1) 有界队列 ===\n";
-    Channel<int> ch(2);
+    channel<int> ch(2);
     std::cout << "  send 1/2: " << ch.send(1) << ' ' << ch.send(2) << '\n';
     std::cout << "  try_send when full: " << ch.try_send(3) << '\n';
     std::cout << "  recv=" << ch.recv().value() << '\n';
 
     std::cout << "\n=== 2) 多生产者 → 单消费者 ===\n";
-    Channel<int> pipe(0);  // 无界，避免生产者在 join 前堵满
+    channel<int> pipe(0);  // 无界，避免生产者在 join 前堵满
     std::thread p1([&] {
         for (int i = 0; i < 5; ++i) {
             pipe.send(i);

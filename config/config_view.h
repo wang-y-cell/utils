@@ -1,14 +1,14 @@
 #pragma once
 
 /**
- * ConfigView — 配置只读视图（不绑具体解析库）
+ * config_view — 配置只读视图（不绑具体解析库）
  *
- *   auto cfg = std::make_shared<utils::MapConfig>();
+ *   auto cfg = std::make_shared<utils::map_config>();
  *   cfg->set("port", 8080);
  *   auto port = cfg->get_int("port");
  *   auto db = cfg->section("db");  // 读 "db.host" 等
  *
- *   utils::EnvConfig env("MYAPP_");  // MYAPP_PORT
+ *   utils::env_config env("MYAPP_");  // MYAPP_PORT
  */
 
 #include <cstdint>
@@ -22,9 +22,9 @@
 
 namespace utils {
 
-class ConfigView {
+class config_view {
 public:
-    virtual ~ConfigView() = default;
+    virtual ~config_view() = default;
 
     [[nodiscard]] virtual std::optional<std::string> get_string(
         std::string_view key) const = 0;
@@ -83,15 +83,15 @@ public:
     }
 
     /** 子节：后续 key 自动加 "name." 前缀 */
-    [[nodiscard]] virtual std::shared_ptr<ConfigView> section(
+    [[nodiscard]] virtual std::shared_ptr<config_view> section(
         std::string_view name) const = 0;
 };
 
 namespace detail {
 
-class PrefixedConfigView : public ConfigView {
+class prefixed_config_view : public config_view {
 public:
-    PrefixedConfigView(std::shared_ptr<const ConfigView> base, std::string prefix)
+    prefixed_config_view(std::shared_ptr<const config_view> base, std::string prefix)
         : base_(std::move(base)), prefix_(std::move(prefix)) {}
 
     [[nodiscard]] std::optional<std::string> get_string(
@@ -99,23 +99,23 @@ public:
         return base_->get_string(prefix_ + std::string(key));
     }
 
-    [[nodiscard]] std::shared_ptr<ConfigView> section(
+    [[nodiscard]] std::shared_ptr<config_view> section(
         std::string_view name) const override {
-        return std::make_shared<PrefixedConfigView>(
+        return std::make_shared<prefixed_config_view>(
             base_, prefix_ + std::string(name) + ".");
     }
 
 private:
-    std::shared_ptr<const ConfigView> base_;
+    std::shared_ptr<const config_view> base_;
     std::string prefix_;
 };
 
 }  // namespace detail
 
 /** 内存字典配置 */
-class MapConfig : public ConfigView {
+class map_config : public config_view {
 public:
-    MapConfig() = default;
+    map_config() = default;
 
     void set(std::string key, std::string value) {
         data_[std::move(key)] = std::move(value);
@@ -147,11 +147,11 @@ public:
         return it->second;
     }
 
-    [[nodiscard]] std::shared_ptr<ConfigView> section(
+    [[nodiscard]] std::shared_ptr<config_view> section(
         std::string_view name) const override {
-        auto copy = std::make_shared<MapConfig>();
+        auto copy = std::make_shared<map_config>();
         copy->data_ = data_;
-        return std::make_shared<detail::PrefixedConfigView>(
+        return std::make_shared<detail::prefixed_config_view>(
             std::move(copy), std::string(name) + ".");
     }
 
@@ -160,9 +160,9 @@ private:
 };
 
 /** 环境变量：prefix + KEY，'.' → '_'，小写转大写 */
-class EnvConfig : public ConfigView {
+class env_config : public config_view {
 public:
-    explicit EnvConfig(std::string prefix = {}) : prefix_(std::move(prefix)) {}
+    explicit env_config(std::string prefix = {}) : prefix_(std::move(prefix)) {}
 
     [[nodiscard]] std::optional<std::string> get_string(
         std::string_view key) const override {
@@ -184,9 +184,9 @@ public:
 #endif
     }
 
-    [[nodiscard]] std::shared_ptr<ConfigView> section(
+    [[nodiscard]] std::shared_ptr<config_view> section(
         std::string_view name) const override {
-        return std::make_shared<EnvConfig>(prefix_ + to_env_key(name) + "_");
+        return std::make_shared<env_config>(prefix_ + to_env_key(name) + "_");
     }
 
 private:

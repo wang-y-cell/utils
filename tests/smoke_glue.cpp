@@ -18,23 +18,23 @@
 using namespace utils;
 
 static void test_expected() {
-    Result<int> a = result_ok(21);
+    result<int> a = result_ok(21);
     auto b = a.transform([](int n) { return n * 2; });
     assert(b && *b == 42);
 
-    Result<int> c = result_err(std::errc::invalid_argument);
-    auto d = c.or_else([](const std::error_code&) -> Result<int> {
+    result<int> c = result_err(std::errc::invalid_argument);
+    auto d = c.or_else([](const std::error_code&) -> result<int> {
         return result_ok(7);
     });
     assert(d && *d == 7);
 
-    Expected<void, int> okv;
+    expected<void, int> okv;
     assert(okv);
-    Expected<void, int> bad = unexpected(3);
+    expected<void, int> bad = unexpected(3);
     assert(!bad && bad.error() == 3);
 
     auto chained =
-        result_ok(2).and_then([](int n) -> Result<int> { return result_ok(n + 1); });
+        result_ok(2).and_then([](int n) -> result<int> { return result_ok(n + 1); });
     assert(chained.value_or(0) == 3);
 }
 
@@ -58,15 +58,15 @@ static void test_scope_guard() {
     assert(n == 2);
 
     try {
-        ScopeFail fail{[&] { ++n; }};
+        scope_fail fail{[&] { ++n; }};
         throw std::runtime_error("x");
     } catch (...) {
     }
     assert(n == 3);
 
     {
-        ScopeFail fail{[&] { ++n; }};
-        ScopeSuccess ok{[&] { ++n; }};
+        scope_fail fail{[&] { ++n; }};
+        scope_success ok{[&] { ++n; }};
     }
     assert(n == 4);  // 仅 success
 }
@@ -101,7 +101,7 @@ static void test_functional() {
 }
 
 static void test_executor() {
-    InlineExecutor inline_ex;
+    inline_executor inline_ex;
     int x = 0;
     inline_ex.post([&] { x = 1; });
     assert(x == 1);
@@ -115,18 +115,18 @@ static void test_executor() {
     pool.wait();
     assert(y == 3);
 
-    AnyExecutor any = pool_ex;
+    any_executor any = pool_ex;
     any.post([&] { y = 4; });
     pool.wait();
     assert(y == 4);
 
-    WorkerThread worker;
+    worker_thread worker;
     worker.start();
-    for (int i = 0; i < 200 && !worker.isRunning(); ++i) {
+    for (int i = 0; i < 200 && !worker.is_running(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EventLoop* wloop = worker.loop();
-    assert(wloop != nullptr && worker.isRunning());
+    event_loop* wloop = worker.loop();
+    assert(wloop != nullptr && worker.is_running());
     auto loop_ex = make_executor(*wloop);
     std::atomic<int> z{0};
     loop_ex.post([&] { z = 9; });
@@ -138,13 +138,13 @@ static void test_executor() {
 }
 
 static void test_deadline() {
-    auto d = Deadline::after(std::chrono::milliseconds(30));
+    auto d = deadline::after(std::chrono::milliseconds(30));
     assert(!d.expired());
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     assert(d.expired());
     assert(d.remaining().count() == 0);
 
-    StopWatch sw;
+    stop_watch sw;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     assert(sw.elapsed_ms() >= 1);
 }
@@ -152,24 +152,24 @@ static void test_deadline() {
 static void test_retry() {
     int calls = 0;
     auto r = retry(
-        [&]() -> Result<int> {
+        [&]() -> result<int> {
             ++calls;
             if (calls < 3) {
                 return result_err(std::errc::connection_reset);
             }
             return result_ok(42);
         },
-        RetryPolicy::fixed(5, std::chrono::milliseconds(1)));
+        retry_policy::fixed(5, std::chrono::milliseconds(1)));
     assert(r && *r == 42);
     assert(calls == 3);
 
     calls = 0;
     auto fail = retry(
-        [&]() -> Result<int> {
+        [&]() -> result<int> {
             ++calls;
             return result_err(std::errc::invalid_argument);
         },
-        RetryPolicy::fixed(3, std::chrono::milliseconds(1)),
+        retry_policy::fixed(3, std::chrono::milliseconds(1)),
         [](const std::error_code& ec) {
             return ec != std::errc::invalid_argument;
         });
@@ -178,7 +178,7 @@ static void test_retry() {
 }
 
 static void test_channel() {
-    Channel<int> ch(2);
+    channel<int> ch(2);
     assert(ch.send(1));
     assert(ch.send(2));
     assert(!ch.try_send(3));  // full
@@ -204,7 +204,7 @@ static void test_channel() {
 }
 
 static void test_config_log() {
-    MapConfig cfg;
+    map_config cfg;
     cfg.set("port", static_cast<std::int64_t>(8080));
     cfg.set("db.host", "localhost");
     cfg.set_bool("flag", true);
@@ -215,10 +215,10 @@ static void test_config_log() {
     auto host = db->get_string("host");
     assert(host && *host == "localhost");
 
-    log::set_backend(std::make_shared<log::NullBackend>());
-    log::set_level(log::Level::Info);
+    log::set_backend(std::make_shared<log::null_backend>());
+    log::set_level(log::level::info);
     log::info("smoke port={}", 8080);
-    log::set_backend(std::make_shared<log::StreamBackend>());
+    log::set_backend(std::make_shared<log::stream_backend>());
 }
 
 int main() {

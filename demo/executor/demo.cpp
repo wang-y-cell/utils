@@ -1,12 +1,12 @@
 /**
- * Executor 用法演示
+ * executor 用法演示
  * 编译: cmake --build build --target demo_executor
  *
  * 要点:
- * - concept Executor: 只要能 post(any_invocable<void()>)
- * - InlineExecutor: 当前线程同步执行（测试默认）
- * - make_executor(thread_pool/EventLoop): 适配现有执行器
- * - AnyExecutor: 类型擦除，运行时可替换后端
+ * - concept executor: 只要能 post(any_invocable<void()>)
+ * - inline_executor: 当前线程同步执行（测试默认）
+ * - make_executor(thread_pool/event_loop): 适配现有执行器
+ * - any_executor: 类型擦除，运行时可替换后端
  */
 
 #include "executor/adapters.h"
@@ -21,8 +21,8 @@
 using namespace utils;
 
 int main() {
-    std::cout << "=== 1) InlineExecutor ===\n";
-    InlineExecutor inline_ex;
+    std::cout << "=== 1) inline_executor ===\n";
+    inline_executor inline_ex;
     int x = 0;
     inline_ex.post([&] { x = 42; });
     std::cout << "  x=" << x << '\n';
@@ -37,14 +37,14 @@ int main() {
     pool.wait();
     std::cout << "  y=" << y.load() << '\n';
 
-    std::cout << "\n=== 3) AnyExecutor 类型擦除 ===\n";
-    AnyExecutor any = pool_ex;
+    std::cout << "\n=== 3) any_executor 类型擦除 ===\n";
+    any_executor any = pool_ex;
     any.post([&] { y = 3; });
     pool.wait();
     std::cout << "  y=" << y.load() << '\n';
 
-    InlineExecutor again;
-    any = AnyExecutor{again};
+    inline_executor again;
+    any = any_executor{again};
     any.post([&] { y = 4; });
     std::cout << "  after inline y=" << y.load() << '\n';
 

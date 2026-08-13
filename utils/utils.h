@@ -5,7 +5,7 @@
  *
  *   #include "utils/utils.h"
  *
- * thread_pool / EventLoop 适配另含：#include "executor/adapters.h"
+ * thread_pool / event_loop 适配另含：#include "executor/adapters.h"
  * 信号槽：#include "signal_and_slots/signal_and_slots.h"
  */
 

@@ -1,11 +1,11 @@
 /**
- * ScopeGuard 用法演示
+ * scope_guard 用法演示
  * 编译: cmake --build build --target demo_scope_guard
  *
  * 要点:
  * - make_scope_guard / UTILS_DEFER: 离开作用域必执行
- * - ScopeFail: 仅异常展开时执行（回滚）
- * - ScopeSuccess: 仅正常离开时执行
+ * - scope_fail: 仅异常展开时执行（回滚）
+ * - scope_success: 仅正常离开时执行
  * - dismiss(): 取消清理（例如所有权已移交）
  */
 
@@ -44,17 +44,17 @@ int main() {
         std::cout << "  before leave\n";
     }
 
-    std::cout << "\n=== 4) ScopeFail / ScopeSuccess ===\n";
+    std::cout << "\n=== 4) scope_fail / scope_success ===\n";
     try {
-        ScopeFail rollback{[] { std::cout << "  rollback (exception path)\n"; }};
-        ScopeSuccess commit{[] { std::cout << "  commit (success path)\n"; }};
+        scope_fail rollback{[] { std::cout << "  rollback (exception path)\n"; }};
+        scope_success commit{[] { std::cout << "  commit (success path)\n"; }};
         throw std::runtime_error("boom");
     } catch (...) {
         std::cout << "  caught\n";
     }
     {
-        ScopeFail rollback{[] { std::cout << "  rollback should NOT run\n"; }};
-        ScopeSuccess commit{[] { std::cout << "  commit ran\n"; }};
+        scope_fail rollback{[] { std::cout << "  rollback should NOT run\n"; }};
+        scope_success commit{[] { std::cout << "  commit ran\n"; }};
     }
 
     std::cout << "\ndemo_scope_guard: ok\n";

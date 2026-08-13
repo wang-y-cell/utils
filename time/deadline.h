@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * StopWatch / Deadline — 计时与截止时间（C++20）
+ * stop_watch / deadline — 计时与截止时间（C++20）
  *
- *   auto d = utils::Deadline::after(200ms);
+ *   auto d = utils::deadline::after(200ms);
  *   while (!d.expired()) { ... }
  *   auto left = d.remaining();
  *
- *   utils::StopWatch sw;
+ *   utils::stop_watch sw;
  *   ...
  *   auto ms = sw.elapsed_ms();
  */
@@ -17,34 +17,34 @@
 
 namespace utils {
 
-class Deadline {
+class deadline {
 public:
-    using Clock = std::chrono::steady_clock;
-    using time_point = Clock::time_point;
-    using duration = Clock::duration;
+    using clock = std::chrono::steady_clock;
+    using time_point = clock::time_point;
+    using duration = clock::duration;
 
-    Deadline() noexcept : tp_(time_point::max()) {}
+    deadline() noexcept : tp_(time_point::max()) {}
 
-    explicit Deadline(time_point tp) noexcept : tp_(tp) {}
+    explicit deadline(time_point tp) noexcept : tp_(tp) {}
 
     template <class Rep, class Period>
-    static Deadline after(std::chrono::duration<Rep, Period> d) {
-        return Deadline(Clock::now() +
+    static deadline after(std::chrono::duration<Rep, Period> d) {
+        return deadline(clock::now() +
                         std::chrono::duration_cast<duration>(d));
     }
 
-    static Deadline at(time_point tp) noexcept { return Deadline(tp); }
+    static deadline at(time_point tp) noexcept { return deadline(tp); }
 
-    static Deadline never() noexcept { return Deadline{}; }
+    static deadline never() noexcept { return deadline{}; }
 
     [[nodiscard]] time_point time_point_value() const noexcept { return tp_; }
 
     [[nodiscard]] bool expired() const noexcept {
-        return Clock::now() >= tp_;
+        return clock::now() >= tp_;
     }
 
     [[nodiscard]] duration remaining() const noexcept {
-        const auto now = Clock::now();
+        const auto now = clock::now();
         if (now >= tp_) {
             return duration::zero();
         }
@@ -60,17 +60,17 @@ private:
     time_point tp_;
 };
 
-class StopWatch {
+class stop_watch {
 public:
-    using Clock = std::chrono::steady_clock;
-    using duration = Clock::duration;
+    using clock = std::chrono::steady_clock;
+    using duration = clock::duration;
 
-    StopWatch() noexcept : start_(Clock::now()) {}
+    stop_watch() noexcept : start_(clock::now()) {}
 
-    void reset() noexcept { start_ = Clock::now(); }
+    void reset() noexcept { start_ = clock::now(); }
 
     [[nodiscard]] duration elapsed() const noexcept {
-        return Clock::now() - start_;
+        return clock::now() - start_;
     }
 
     template <class Dur = std::chrono::milliseconds>
@@ -87,7 +87,7 @@ public:
     }
 
 private:
-    Clock::time_point start_;
+    clock::time_point start_;
 };
 
 }  // namespace utils

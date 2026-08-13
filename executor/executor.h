@@ -1,9 +1,9 @@
 #pragma once
 
 /**
- * Executor 核心：concept + InlineExecutor + AnyExecutor（C++20）
+ * executor 核心：concept + inline_executor + any_executor（C++20）
  *
- * 适配 thread_pool / EventLoop 见 executor/adapters.h
+ * 适配 thread_pool / event_loop 见 executor/adapters.h
  */
 
 #include "functional/any_invocable.h"
@@ -16,17 +16,17 @@
 namespace utils {
 
 template <class E>
-concept Executor = requires(E& e, any_invocable<void()>&& f) {
+concept executor = requires(E& e, any_invocable<void()>&& f) {
     { e.post(std::move(f)) };
 };
 
 template <class E>
-concept TryExecutor = Executor<E> && requires(E& e, any_invocable<void()>&& f) {
+concept try_executor = executor<E> && requires(E& e, any_invocable<void()>&& f) {
     { e.try_post(std::move(f)) } -> std::convertible_to<bool>;
 };
 
 /** 当前线程同步执行（测试 / 默认） */
-class InlineExecutor {
+class inline_executor {
 public:
     template <class F>
     void post(F&& f) {
@@ -40,26 +40,26 @@ public:
     }
 };
 
-/** 类型擦除 Executor：运行时可换实现 */
-class AnyExecutor {
+/** 类型擦除 executor：运行时可换实现 */
+class any_executor {
 public:
-    AnyExecutor() = default;
+    any_executor() = default;
 
     template <class E>
-        requires Executor<std::decay_t<E>> &&
-                 (!std::is_same_v<std::decay_t<E>, AnyExecutor>)
-    AnyExecutor(E& exec)
-        : self_(std::make_shared<Model<std::decay_t<E>>>(exec)) {}
+        requires executor<std::decay_t<E>> &&
+                 (!std::is_same_v<std::decay_t<E>, any_executor>)
+    any_executor(E& exec)
+        : self_(std::make_shared<model<std::decay_t<E>>>(exec)) {}
 
     template <class E>
-        requires Executor<std::decay_t<E>> &&
-                 (!std::is_same_v<std::decay_t<E>, AnyExecutor>)
-    AnyExecutor(E* exec) : AnyExecutor(*exec) {}
+        requires executor<std::decay_t<E>> &&
+                 (!std::is_same_v<std::decay_t<E>, any_executor>)
+    any_executor(E* exec) : any_executor(*exec) {}
 
-    AnyExecutor(const AnyExecutor&) = default;
-    AnyExecutor(AnyExecutor&&) noexcept = default;
-    AnyExecutor& operator=(const AnyExecutor&) = default;
-    AnyExecutor& operator=(AnyExecutor&&) noexcept = default;
+    any_executor(const any_executor&) = default;
+    any_executor(any_executor&&) noexcept = default;
+    any_executor& operator=(const any_executor&) = default;
+    any_executor& operator=(any_executor&&) noexcept = default;
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return static_cast<bool>(self_);
@@ -82,15 +82,15 @@ public:
     }
 
 private:
-    struct Concept {
-        virtual ~Concept() = default;
+    struct concept_base {
+        virtual ~concept_base() = default;
         virtual void post(any_invocable<void()> f) = 0;
         virtual bool try_post(any_invocable<void()> f) = 0;
     };
 
     template <class E>
-    struct Model final : Concept {
-        explicit Model(E& e) : exec(&e) {}
+    struct model final : concept_base {
+        explicit model(E& e) : exec(&e) {}
         E* exec;
 
         void post(any_invocable<void()> f) override { exec->post(std::move(f)); }
@@ -109,11 +109,11 @@ private:
         }
     };
 
-    std::shared_ptr<Concept> self_;
+    std::shared_ptr<concept_base> self_;
 };
 
-[[nodiscard]] inline InlineExecutor make_inline_executor() noexcept {
-    return InlineExecutor{};
+[[nodiscard]] inline inline_executor make_inline_executor() noexcept {
+    return inline_executor{};
 }
 
 }  // namespace utils

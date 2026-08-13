@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * ScopeGuard / ScopeSuccess / ScopeFail / UTILS_DEFER — RAII 收尾（C++20）
+ * scope_guard / scope_success / scope_fail / UTILS_DEFER — RAII 收尾（C++20）
  *
  * 日常用法：
  *   auto g = utils::make_scope_guard([&] { close(fd); });
  *   UTILS_DEFER { unlock(); };
- *   utils::ScopeFail rollback{[&] { flag = old; }};
+ *   utils::scope_fail rollback{[&] { flag = old; }};
  *
  * 异常策略：清理函数应不抛；栈展开中再抛 → std::terminate。
  */
@@ -18,29 +18,29 @@
 namespace utils {
 
 template <class F>
-class ScopeGuard {
+class scope_guard {
 public:
-    static_assert(std::is_invocable_v<F&>, "ScopeGuard F must be invocable");
+    static_assert(std::is_invocable_v<F&>, "scope_guard F must be invocable");
 
-    explicit ScopeGuard(F&& f) noexcept(
+    explicit scope_guard(F&& f) noexcept(
         std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(f)), active_(true) {}
 
-    explicit ScopeGuard(const F& f) noexcept(
+    explicit scope_guard(const F& f) noexcept(
         std::is_nothrow_copy_constructible_v<F>)
         : func_(f), active_(true) {}
 
-    ScopeGuard(ScopeGuard&& other) noexcept(
+    scope_guard(scope_guard&& other) noexcept(
         std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(other.func_)), active_(other.active_) {
         other.active_ = false;
     }
 
-    ScopeGuard(const ScopeGuard&) = delete;
-    ScopeGuard& operator=(const ScopeGuard&) = delete;
-    ScopeGuard& operator=(ScopeGuard&&) = delete;
+    scope_guard(const scope_guard&) = delete;
+    scope_guard& operator=(const scope_guard&) = delete;
+    scope_guard& operator=(scope_guard&&) = delete;
 
-    ~ScopeGuard() noexcept {
+    ~scope_guard() noexcept {
         if (active_) {
             func_();
         }
@@ -60,26 +60,26 @@ private:
 };
 
 template <class F>
-[[nodiscard]] ScopeGuard<std::decay_t<F>> make_scope_guard(F&& f) {
-    return ScopeGuard<std::decay_t<F>>(std::forward<F>(f));
+[[nodiscard]] scope_guard<std::decay_t<F>> make_scope_guard(F&& f) {
+    return scope_guard<std::decay_t<F>>(std::forward<F>(f));
 }
 
 template <class F>
-class ScopeSuccess {
+class scope_success {
 public:
-    explicit ScopeSuccess(F&& f) noexcept(
+    explicit scope_success(F&& f) noexcept(
         std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(f)),
           active_(true),
           exception_count_(std::uncaught_exceptions()) {} //当前的异常还没有被catch到的数量
 
-    explicit ScopeSuccess(const F& f) noexcept(
+    explicit scope_success(const F& f) noexcept(
         std::is_nothrow_copy_constructible_v<F>)
         : func_(f),
           active_(true),
           exception_count_(std::uncaught_exceptions()) {}
 
-    ScopeSuccess(ScopeSuccess&& other) noexcept(
+    scope_success(scope_success&& other) noexcept(
         std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(other.func_)),
           active_(other.active_),
@@ -87,11 +87,11 @@ public:
         other.active_ = false;
     }
 
-    ScopeSuccess(const ScopeSuccess&) = delete;
-    ScopeSuccess& operator=(const ScopeSuccess&) = delete;
-    ScopeSuccess& operator=(ScopeSuccess&&) = delete;
+    scope_success(const scope_success&) = delete;
+    scope_success& operator=(const scope_success&) = delete;
+    scope_success& operator=(scope_success&&) = delete;
 
-    ~ScopeSuccess() noexcept {
+    ~scope_success() noexcept {
         /** 如果当前的异常还没有被catch到的数量等于初始化时的异常还没有被catch到的数量，则执行这个函数 */
         if (active_ && std::uncaught_exceptions() == exception_count_) {
             func_();
@@ -108,25 +108,25 @@ private:
 };
 
 template <class F>
-[[nodiscard]] ScopeSuccess<std::decay_t<F>> make_scope_success(F&& f) {
-    return ScopeSuccess<std::decay_t<F>>(std::forward<F>(f));
+[[nodiscard]] scope_success<std::decay_t<F>> make_scope_success(F&& f) {
+    return scope_success<std::decay_t<F>>(std::forward<F>(f));
 }
 
 template <class F>
-class ScopeFail {
+class scope_fail {
 public:
-    explicit ScopeFail(F&& f) noexcept(std::is_nothrow_move_constructible_v<F>)
+    explicit scope_fail(F&& f) noexcept(std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(f)),
           active_(true),
           exception_count_(std::uncaught_exceptions()) {}
 
-    explicit ScopeFail(const F& f) noexcept(
+    explicit scope_fail(const F& f) noexcept(
         std::is_nothrow_copy_constructible_v<F>)
         : func_(f),
           active_(true),
           exception_count_(std::uncaught_exceptions()) {}
 
-    ScopeFail(ScopeFail&& other) noexcept(
+    scope_fail(scope_fail&& other) noexcept(
         std::is_nothrow_move_constructible_v<F>)
         : func_(std::move(other.func_)),
           active_(other.active_),
@@ -134,11 +134,11 @@ public:
         other.active_ = false;
     }
 
-    ScopeFail(const ScopeFail&) = delete;
-    ScopeFail& operator=(const ScopeFail&) = delete;
-    ScopeFail& operator=(ScopeFail&&) = delete;
+    scope_fail(const scope_fail&) = delete;
+    scope_fail& operator=(const scope_fail&) = delete;
+    scope_fail& operator=(scope_fail&&) = delete;
 
-    ~ScopeFail() noexcept {
+    ~scope_fail() noexcept {
         if (active_ && std::uncaught_exceptions() > exception_count_) {
             func_();
         }
@@ -154,16 +154,16 @@ private:
 };
 
 template <class F>
-[[nodiscard]] ScopeFail<std::decay_t<F>> make_scope_fail(F&& f) {
-    return ScopeFail<std::decay_t<F>>(std::forward<F>(f));
+[[nodiscard]] scope_fail<std::decay_t<F>> make_scope_fail(F&& f) {
+    return scope_fail<std::decay_t<F>>(std::forward<F>(f));
 }
 
 namespace detail {
 
-struct DeferFactory {
+struct defer_factory {
     template <class F>
-    [[nodiscard]] ScopeGuard<std::decay_t<F>> operator<<(F&& f) const {
-        return ScopeGuard<std::decay_t<F>>(std::forward<F>(f));
+    [[nodiscard]] scope_guard<std::decay_t<F>> operator<<(F&& f) const {
+        return scope_guard<std::decay_t<F>>(std::forward<F>(f));
     }
 };
 
@@ -180,4 +180,4 @@ struct DeferFactory {
  */
 #define UTILS_DEFER                                   \
     const auto UTILS_CONCAT(_utils_defer_, __LINE__) = \
-        ::utils::detail::DeferFactory{} << [&]()
+        ::utils::detail::defer_factory{} << [&]()

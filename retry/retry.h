@@ -4,8 +4,8 @@
  * Retry / Backoff — 重试策略对象（C++20）
  *
  *   auto r = utils::retry(
- *       []() -> utils::Result<int> { return fetch(); },
- *       utils::RetryPolicy::exponential(5, 10ms));
+ *       []() -> utils::result<int> { return fetch(); },
+ *       utils::retry_policy::exponential(5, 10ms));
  *
  * 取消使用标准库 std::stop_token（可选参数）。
  */
@@ -26,7 +26,7 @@
 
 namespace utils {
 
-class RetryPolicy {
+class retry_policy {
 public:
     using duration = std::chrono::steady_clock::duration;
 
@@ -36,8 +36,8 @@ public:
     duration max_delay = std::chrono::seconds(5);
     bool jitter = true;
 
-    static RetryPolicy fixed(std::size_t attempts, duration delay) {
-        RetryPolicy p;
+    static retry_policy fixed(std::size_t attempts, duration delay) {
+        retry_policy p;
         p.max_attempts = attempts == 0 ? 1 : attempts;
         p.initial_delay = delay;
         p.multiplier = 1.0;
@@ -46,10 +46,10 @@ public:
         return p;
     }
 
-    static RetryPolicy exponential(std::size_t attempts, duration initial,
+    static retry_policy exponential(std::size_t attempts, duration initial,
                                    double mult = 2.0,
                                    duration max_d = std::chrono::seconds(5)) {
-        RetryPolicy p;
+        retry_policy p;
         p.max_attempts = attempts == 0 ? 1 : attempts;
         p.initial_delay = initial;
         p.multiplier = mult < 1.0 ? 1.0 : mult;
@@ -91,7 +91,7 @@ namespace detail {
 template <class R>
 struct is_expected_result : std::false_type {};
 template <class T, class E>
-struct is_expected_result<Expected<T, E>> : std::true_type {};
+struct is_expected_result<expected<T, E>> : std::true_type {};
 
 template <class R>
 R make_cancel_result() {
@@ -110,17 +110,17 @@ R make_cancel_result() {
 }  // namespace detail
 
 /**
- * 对返回 Expected/Result 的操作重试。
+ * 对返回 expected/result 的操作重试。
  * should_retry(error) 为 true 时才退避再试。
  */
 template <class F, class Pred>
-auto retry(F&& op, RetryPolicy policy, Pred&& should_retry,
+auto retry(F&& op, retry_policy policy, Pred&& should_retry,
            std::stop_token token = {},
-           Deadline deadline = Deadline::never())
+           deadline deadline = deadline::never())
     -> std::invoke_result_t<F&> {
     using R = std::invoke_result_t<F&>;
     static_assert(detail::is_expected_result<R>::value,
-                  "retry() requires Expected/Result return type");
+                  "retry() requires expected/result return type");
 
     std::optional<R> last_fail;
     std::size_t attempt = 0;
@@ -162,8 +162,8 @@ auto retry(F&& op, RetryPolicy policy, Pred&& should_retry,
 }
 
 template <class F>
-auto retry(F&& op, RetryPolicy policy, std::stop_token token = {},
-           Deadline deadline = Deadline::never()) {
+auto retry(F&& op, retry_policy policy, std::stop_token token = {},
+           deadline deadline = deadline::never()) {
     return retry(
         std::forward<F>(op), std::move(policy),
         [](const auto&) { return true; }, std::move(token), deadline);

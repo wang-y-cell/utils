@@ -3,9 +3,9 @@
  * 编译: cmake --build build --target demo_signal
  *
  * 要点:
- * - 槽接收者继承 Object，才能 Queued/Auto 跨线程与析构自动断连
- * - ConnectionType: Direct / Queued / Auto
- * - ScopedConnection RAII；WorkerThread + invoke / 定时器
+ * - 槽接收者继承 object，才能 Queued/Auto 跨线程与析构自动断连
+ * - connection_type: Direct / Queued / Auto
+ * - scoped_connection RAII；worker_thread + invoke / 定时器
  */
 
 #include "signal_and_slots/signal_and_slots.h"
@@ -19,25 +19,25 @@
 using namespace utils;
 using namespace std::chrono_literals;
 
-class Button : public Object {
+class button : public object {
 public:
-    Signal<> onClicked;
-    Signal<std::string> onDoubleClicked;
+    signal<> on_clicked;
+    signal<std::string> on_double_clicked;
 
 };
 
-class Window : public Object {
+class window : public object {
 public:
-    explicit Window(std::string name) : name_(std::move(name)) {}
+    explicit window(std::string name) : name_(std::move(name)) {}
 
-    ~Window() override { invalidate(); }
+    ~window() override { invalidate(); }
 
-    void onUpdateUI() {
+    void on_update_ui() {
         std::cout << "[" << name_ << "] UI refresh @ "
                   << std::this_thread::get_id() << "\n";
     }
 
-    void onUpdateUIDouble(const std::string& event_type) {
+    void on_update_ui_double(const std::string& event_type) {
         std::cout << "[" << name_ << "] double(" << event_type << ") @ "
                   << std::this_thread::get_id() << "\n";
     }
@@ -49,27 +49,27 @@ private:
 static void demo_cross_thread() {
     std::cout << "\n=== 1) Auto: 同线程 Direct / 跨线程 Queued ===\n";
 
-    WorkerThread worker;
+    worker_thread worker;
     worker.start();
 
-    // 无需 main_marker：Object 构造已绑定主线程默认 loop
-    Button button;
-    Window win_ui("MainWindow");
-    Window win_worker("WorkerWindow");
+    // 无需 main_marker：object 构造已绑定主线程默认 loop
+    button button;
+    window win_ui("MainWindow");
+    window win_worker("WorkerWindow");
 
-    win_worker.moveToThread(worker.loop());
+    win_worker.move_to_thread(worker.loop());
 
     // connect 语法糖：成员函数指针
-    ScopedConnection c1{
-        connect(button.onClicked, &win_ui, &Window::onUpdateUI)};
-    ScopedConnection c2{
-        button.onClicked.connect(&win_worker, &Window::onUpdateUI)};
-    Connection c3 = connect(button.onDoubleClicked, &win_ui,
-                            &Window::onUpdateUIDouble, ConnectionType::Direct);
+    scoped_connection c1{
+        connect(button.on_clicked, &win_ui, &window::on_update_ui)};
+    scoped_connection c2{
+        button.on_clicked.connect(&win_worker, &window::on_update_ui)};
+    connection c3 = connect(button.on_double_clicked, &win_ui,
+                            &window::on_update_ui_double, connection_type::direct);
 
     
-    button.onClicked.emit();
-    button.onDoubleClicked.emit("ON_DOUBLE_CLICK");
+    button.on_clicked.emit();
+    button.on_double_clicked.emit("ON_DOUBLE_CLICK");
 
     std::this_thread::sleep_for(50ms);
 
@@ -82,34 +82,34 @@ static void demo_cross_thread() {
 static void demo_lifetime() {
     std::cout << "\n=== 2) 接收者析构后自动断开，不再回调 ===\n";
 
-    Button button;
+    button button;
     std::atomic<int> hits{0};
 
     {
-        Window temp("TempWindow");
-        button.onClicked.connect(&temp, [&] {
+        window temp("TempWindow");
+        button.on_clicked.connect(&temp, [&] {
             hits.fetch_add(1);
-            temp.onUpdateUI();
+            temp.on_update_ui();
         });
-        button.onClicked.emit();
+        button.on_clicked.emit();
     }
 
-    button.onClicked.emit();
+    button.on_clicked.emit();
     std::cout << "hits=" << hits.load() << " (期望 1)\n";
 }
 
 static void demo_timer_and_invoke() {
     std::cout << "\n=== 3) 定时器 + invoke ===\n";
 
-    WorkerThread worker;
+    worker_thread worker;
     worker.start();
 
-    Window win("TimerWindow");
-    win.moveToThread(worker.loop());
+    window win("TimerWindow");
+    win.move_to_thread(worker.loop());
 
     std::atomic<int> ticks{0};
 
-    auto tid = worker.loop()->postPeriodic(30ms, [&] {
+    auto tid = worker.loop()->post_periodic(30ms, [&] {
         int n = ticks.fetch_add(1) + 1;
         std::cout << "[timer] tick " << n << " @ "
                   << std::this_thread::get_id() << "\n";
@@ -118,34 +118,34 @@ static void demo_timer_and_invoke() {
     invoke(&win, [&] {
         std::cout << "[invoke] on worker @ " << std::this_thread::get_id()
                   << "\n";
-        win.onUpdateUI();
+        win.on_update_ui();
     });
 
     std::this_thread::sleep_for(120ms);
-    worker.loop()->cancelTimer(tid);
+    worker.loop()->cancel_timer(tid);
     std::this_thread::sleep_for(40ms);
     worker.stop();
     std::cout << "timer ticks=" << ticks.load() << " (期望约 3~4)\n";
 }
 
 static void demo_scoped_disconnect() {
-    std::cout << "\n=== 4) ScopedConnection RAII ===\n";
+    std::cout << "\n=== 4) scoped_connection RAII ===\n";
 
-    Button button;
+    button button;
     std::atomic<int> hits{0};
 
     {
-        ScopedConnection sc{
-            button.onClicked.connect([&] { hits.fetch_add(1); })};
-            button.onClicked.emit();
+        scoped_connection sc{
+            button.on_clicked.connect([&] { hits.fetch_add(1); })};
+            button.on_clicked.emit();
     }
 
-    button.onClicked.emit();
+    button.on_clicked.emit();
     std::cout << "hits=" << hits.load() << " (期望 1)\n";
 }
 
 int main() {
-    CoreApplication app;  // 主线程注册默认 EventLoop（仿 QCoreApplication）
+    core_application app;  // 主线程注册默认 event_loop（仿 QCoreApplication）
 
     demo_cross_thread();
     demo_lifetime();
