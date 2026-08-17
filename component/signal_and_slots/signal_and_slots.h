@@ -9,7 +9,8 @@
  *
  * 能力：
  *   - connection_type: Direct / Queued / BlockingQueued / Auto
- *   - unique 连接：同一接收者 + 同一成员槽只连一次（lambda 无法可靠去重）
+ *   - 槽必须返回 slots_t / slots_t<T>（普通 void 函数不能 connect）
+ *   - unique 连接：同一接收者 + 同一成员槽只连一次
  *   - object::block_signals：批量改状态时暂停该对象发出的信号（信号需 signal{this}）
  *   - signal::disconnect(receiver)：按接收者断开
  *   - connection / scoped_connection（可断开、RAII）
@@ -19,8 +20,9 @@
  *   - event_loop：post / 延迟定时器 / 周期定时器 / process_events
  *   - worker_thread：一线程一循环
  *   - core_application / ensure_thread_loop：每线程默认 event_loop（仿 QThread 亲和）
- *   - connect 语法糖
- *   - invoke：把可调用对象投递到目标 object 所在线程
+ *   - connect 语法糖；emit / connect 丢弃槽返回值
+ *   - invoke(槽)：Direct / BlockingQueued 用 result<T> 取回 slots_t 中的值
+ *   - invoke(可调用对象)：把无返回值任务投递到目标 object 所在线程
  *
  * 命名空间：utils（旧名 qto 仍可用别名兼容）
  *
@@ -53,6 +55,8 @@
 #include <utility>
 #include <vector>
 
+#include "component/result/expected.h"
+
 namespace utils {
 
 enum class connection_type {
@@ -63,6 +67,39 @@ enum class connection_type {
 };
 
 inline constexpr bool unique_connection = true;
+
+/**
+ * @brief 槽函数返回类型：标记「这是槽」，需要时带一个值。
+ * @note connect / emit 丢弃返回值；只有 invoke 会 get()。
+ */
+template <class T = void>
+class slots_t {
+    T value_{};
+
+public:
+    slots_t() = default;
+    slots_t(const slots_t&) = default;
+    slots_t(slots_t&&) = default;
+    slots_t& operator=(const slots_t&) = default;
+    slots_t& operator=(slots_t&&) = default;
+
+    template <class U,
+              std::enable_if_t<
+                  !std::is_same_v<std::decay_t<U>, slots_t> &&
+                      std::is_constructible_v<T, U>,
+                  int> = 0>
+    slots_t(U&& v) : value_(std::forward<U>(v)) {}
+
+    T& get() & noexcept { return value_; }
+    const T& get() const& noexcept { return value_; }
+    T get() && noexcept { return std::move(value_); }
+};
+
+template <>
+class slots_t<void> {
+public:
+    slots_t() = default;
+};
 
 class event_loop;
 class object;
@@ -661,125 +698,75 @@ public:
         return _owner->signals_blocked();
     }
 
-    /// 绑定到 receiver：支持 Auto/Queued/Direct；receiver 析构自动断开
-    connection connect(object* receiver, slot slot_,
-                       connection_type type = connection_type::automatic,
-                       bool unique = false) {
-        if (!slot_) return {};
-        slot_key key = make_functor_key(receiver, slot_);
-        return add_connection(receiver, std::move(slot_), type, unique, key);
-    }
-
-    /// 语法糖：成员函数槽 connect(recv, &recv::method)
-    template <typename recv, typename slot_class, typename... slot_args>
-    connection connect(recv* receiver, void (slot_class::*method)(slot_args...),
-                       connection_type type = connection_type::automatic,
-                       bool unique = false) {
-        static_assert(std::is_base_of_v<object, recv>,
-                      "receiver must derive from utils::object");
-        if (!receiver || !method) return {};
-        object* obj = static_cast<object*>(receiver);
-        return add_connection(
-            obj,
-            [receiver, method](const Args&... args) {
-                (receiver->*method)(args...);
-            },
-            type, unique, make_pmf_key(obj, method));
-    }
-
-    template <typename recv, typename slot_class, typename... slot_args>
+    /// 语法糖：成员函数槽 connect(recv, &recv::method)，方法必须返回 slots_t<R>
+    template <typename recv, typename slot_class, typename R,
+              typename... slot_args>
     connection connect(recv* receiver,
-                       void (slot_class::*method)(slot_args...) const,
+                       slots_t<R> (slot_class::*method)(slot_args...),
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
-        static_assert(std::is_base_of_v<object, recv>,
-                      "receiver must derive from utils::object");
-        if (!receiver || !method) return {};
-        object* obj = static_cast<object*>(receiver);
-        return add_connection(
-            obj,
-            [receiver, method](const Args&... args) {
-                (receiver->*method)(args...);
-            },
-            type, unique, make_pmf_key(obj, method));
+        return connect_pmf(receiver, method, type, unique);
+    }
+
+    template <typename recv, typename slot_class, typename R,
+              typename... slot_args>
+    connection connect(recv* receiver,
+                       slots_t<R> (slot_class::*method)(slot_args...) const,
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect_pmf(receiver, method, type, unique);
     }
 
     /// 智能指针语法糖（非拥有：不因连接持有 shared 延长寿命）
-    template <typename recv, typename D, typename slot_class,
+    template <typename recv, typename D, typename slot_class, typename R,
               typename... slot_args>
     connection connect(const std::unique_ptr<recv, D>& receiver,
-                       void (slot_class::*method)(slot_args...),
+                       slots_t<R> (slot_class::*method)(slot_args...),
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         return connect(receiver.get(), method, type, unique);
     }
-    template <typename recv, typename D, typename slot_class,
+    template <typename recv, typename D, typename slot_class, typename R,
               typename... slot_args>
     connection connect(const std::unique_ptr<recv, D>& receiver,
-                       void (slot_class::*method)(slot_args...) const,
+                       slots_t<R> (slot_class::*method)(slot_args...) const,
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         return connect(receiver.get(), method, type, unique);
     }
-    template <typename recv, typename slot_class, typename... slot_args>
+    template <typename recv, typename slot_class, typename R,
+              typename... slot_args>
     connection connect(const std::shared_ptr<recv>& receiver,
-                       void (slot_class::*method)(slot_args...),
+                       slots_t<R> (slot_class::*method)(slot_args...),
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         return connect(receiver.get(), method, type, unique);
     }
-    template <typename recv, typename slot_class, typename... slot_args>
+    template <typename recv, typename slot_class, typename R,
+              typename... slot_args>
     connection connect(const std::shared_ptr<recv>& receiver,
-                       void (slot_class::*method)(slot_args...) const,
+                       slots_t<R> (slot_class::*method)(slot_args...) const,
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         return connect(receiver.get(), method, type, unique);
     }
-    template <typename recv, typename slot_class, typename... slot_args>
+    template <typename recv, typename slot_class, typename R,
+              typename... slot_args>
     connection connect(const std::weak_ptr<recv>& receiver,
-                       void (slot_class::*method)(slot_args...),
+                       slots_t<R> (slot_class::*method)(slot_args...),
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         auto locked = receiver.lock();
         return connect(locked.get(), method, type, unique);
     }
-    template <typename recv, typename slot_class, typename... slot_args>
+    template <typename recv, typename slot_class, typename R,
+              typename... slot_args>
     connection connect(const std::weak_ptr<recv>& receiver,
-                       void (slot_class::*method)(slot_args...) const,
+                       slots_t<R> (slot_class::*method)(slot_args...) const,
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         auto locked = receiver.lock();
         return connect(locked.get(), method, type, unique);
-    }
-    template <typename recv, typename D>
-    connection connect(const std::unique_ptr<recv, D>& receiver, slot slot_,
-                       connection_type type = connection_type::automatic,
-                       bool unique = false) {
-        return connect(static_cast<object*>(receiver.get()), std::move(slot_),
-                       type, unique);
-    }
-    template <typename recv>
-    connection connect(const std::shared_ptr<recv>& receiver, slot slot_,
-                       connection_type type = connection_type::automatic,
-                       bool unique = false) {
-        return connect(static_cast<object*>(receiver.get()), std::move(slot_),
-                       type, unique);
-    }
-    template <typename recv>
-    connection connect(const std::weak_ptr<recv>& receiver, slot slot_,
-                       connection_type type = connection_type::automatic,
-                       bool unique = false) {
-        auto locked = receiver.lock();
-        return connect(static_cast<object*>(locked.get()), std::move(slot_),
-                       type, unique);
-    }
-
-    /// 无 receiver：始终在 emit 线程 Direct 调用（注意捕获对象生命周期）
-    connection connect(slot slot_, bool unique = false) {
-        if (!slot_) return {};
-        slot_key key = make_functor_key(nullptr, slot_);
-        return add_connection(nullptr, std::move(slot_), connection_type::direct,
-                              unique, key);
     }
 
     void disconnect(connection& c) { c.disconnect(); }
@@ -930,6 +917,21 @@ public:
     void operator()(const Args&... args) const { emit(args...); }
 
 private:
+    template <typename recv, typename Method>
+    connection connect_pmf(recv* receiver, Method method, connection_type type,
+                           bool unique) {
+        static_assert(std::is_base_of_v<object, recv>,
+                      "receiver must derive from utils::object");
+        if (!receiver || !method) return {};
+        object* obj = static_cast<object*>(receiver);
+        return add_connection(
+            obj,
+            [receiver, method](const Args&... args) {
+                (void)(receiver->*method)(args...);
+            },
+            type, unique, make_pmf_key(obj, method));
+    }
+
     struct slot_key {
         object* receiver = nullptr;
         const std::type_info* pmf_type = nullptr;
@@ -963,20 +965,6 @@ private:
         key.equal = [](const void* a, const void* b) {
             return *static_cast<const M*>(a) == *static_cast<const M*>(b);
         };
-        return key;
-    }
-
-    static slot_key make_functor_key(object* receiver, const slot& slot_) {
-        slot_key key;
-        key.receiver = receiver;
-        using fp = void (*)(Args...);
-        if (auto* p = slot_.template target<fp>()) {
-            key.pmf_type = &typeid(fp);
-            key.pmf = std::make_shared<fp>(*p);
-            key.equal = [](const void* a, const void* b) {
-                return *static_cast<const fp*>(a) == *static_cast<const fp*>(b);
-            };
-        }
         return key;
     }
 
@@ -1038,8 +1026,163 @@ private:
 };
 
 // =============================================================================
-// invoke：将函数投递到 object 所在线程
+// invoke：槽成员函数取返回值；或把无返回值任务投递到 object 所在线程
 // =============================================================================
+namespace detail {
+
+template <class M>
+struct slot_pmf_traits {};
+
+template <class C, class R, class... A>
+struct slot_pmf_traits<slots_t<R> (C::*)(A...)> {
+    using value_type = R;
+};
+
+template <class C, class R, class... A>
+struct slot_pmf_traits<slots_t<R> (C::*)(A...) const> {
+    using value_type = R;
+};
+
+template <class Recv, class Method, class... Args>
+result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
+    Recv* receiver, Method method, connection_type type, Args&&... args) {
+    using R = typename slot_pmf_traits<Method>::value_type;
+    static_assert(std::is_base_of_v<object, Recv>,
+                  "receiver must derive from utils::object");
+    if (!receiver || !method) return result_err(std::errc::invalid_argument);
+
+    object* obj = static_cast<object*>(receiver);
+    event_loop* loop_ = obj->thread();
+    const bool same_thread = (loop_ == current_thread_loop());
+
+    bool use_direct = false;
+    bool use_blocking = false;
+    if (type == connection_type::queued) {
+        return result_err(std::errc::operation_in_progress);
+    }
+    if (type == connection_type::blocking_queued) {
+        if (same_thread) {
+            use_direct = true;
+        } else if (!loop_ || !loop_->is_running()) {
+            return result_err(std::errc::operation_not_permitted);
+        } else {
+            use_blocking = true;
+        }
+    } else if (type == connection_type::direct) {
+        if (same_thread || !loop_) {
+            use_direct = true;
+        } else {
+            return result_err(std::errc::operation_in_progress);
+        }
+    } else {
+        if (same_thread || !loop_) {
+            use_direct = true;
+        } else {
+            return result_err(std::errc::operation_in_progress);
+        }
+    }
+
+    auto call = [&]() -> result<R> {
+        if (!obj->lifetime().lock()) return result_err(std::errc::owner_dead);
+        if constexpr (std::is_void_v<R>) {
+            (receiver->*method)(std::forward<Args>(args)...);
+            return result_ok();
+        } else {
+            return result_ok(
+                (receiver->*method)(std::forward<Args>(args)...).get());
+        }
+    };
+
+    if (use_direct) return call();
+    if (!use_blocking) return result_err(std::errc::operation_in_progress);
+
+    auto out = std::make_shared<result<R>>(
+        result_err(std::errc::operation_canceled));
+    std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
+    auto weak = obj->lifetime();
+    const bool posted = loop_->post_blocking(
+        [receiver, method, bound_args = std::move(bound_args), weak,
+         out]() mutable {
+            if (!weak.lock()) {
+                *out = result<R>(result_err(std::errc::owner_dead));
+                return;
+            }
+            if constexpr (std::is_void_v<R>) {
+                std::apply(
+                    [&](auto&&... a) {
+                        (receiver->*method)(std::forward<decltype(a)>(a)...);
+                    },
+                    std::move(bound_args));
+                *out = result_ok();
+            } else {
+                *out = result_ok(std::apply(
+                    [&](auto&&... a) {
+                        return (receiver->*method)(
+                                   std::forward<decltype(a)>(a)...)
+                            .get();
+                    },
+                    std::move(bound_args)));
+            }
+        });
+    if (!posted) return result_err(std::errc::operation_canceled);
+    return std::move(*out);
+}
+
+}  // namespace detail
+
+/** @brief 调用成员槽并取回 slots_t 中的值（Queued / 跨线程 Auto 无法同步取值） */
+template <class Recv, class C, class R, class... SlotArgs>
+result<R> invoke(Recv* receiver, slots_t<R> (C::*method)(SlotArgs...),
+                 connection_type type, SlotArgs... args) {
+    return detail::invoke_slot(receiver, method, type,
+                               std::forward<SlotArgs>(args)...);
+}
+
+template <class Recv, class C, class R, class... SlotArgs>
+result<R> invoke(Recv* receiver, slots_t<R> (C::*method)(SlotArgs...) const,
+                 connection_type type, SlotArgs... args) {
+    return detail::invoke_slot(receiver, method, type,
+                               std::forward<SlotArgs>(args)...);
+}
+
+template <class Recv, class C, class R, class... SlotArgs>
+result<R> invoke(Recv* receiver, slots_t<R> (C::*method)(SlotArgs...),
+                 SlotArgs... args) {
+    return detail::invoke_slot(receiver, method, connection_type::automatic,
+                               std::forward<SlotArgs>(args)...);
+}
+
+template <class Recv, class C, class R, class... SlotArgs>
+result<R> invoke(Recv* receiver, slots_t<R> (C::*method)(SlotArgs...) const,
+                 SlotArgs... args) {
+    return detail::invoke_slot(receiver, method, connection_type::automatic,
+                               std::forward<SlotArgs>(args)...);
+}
+
+template <class Recv, class D, class C, class R, class... SlotArgs>
+result<R> invoke(const std::unique_ptr<Recv, D>& receiver,
+                 slots_t<R> (C::*method)(SlotArgs...), connection_type type,
+                 SlotArgs... args) {
+    return invoke(receiver.get(), method, type, std::forward<SlotArgs>(args)...);
+}
+template <class Recv, class D, class C, class R, class... SlotArgs>
+result<R> invoke(const std::unique_ptr<Recv, D>& receiver,
+                 slots_t<R> (C::*method)(SlotArgs...), SlotArgs... args) {
+    return invoke(receiver.get(), method, std::forward<SlotArgs>(args)...);
+}
+template <class Recv, class C, class R, class... SlotArgs>
+result<R> invoke(const std::shared_ptr<Recv>& receiver,
+                 slots_t<R> (C::*method)(SlotArgs...), connection_type type,
+                 SlotArgs... args) {
+    return invoke(receiver.get(), method, type, std::forward<SlotArgs>(args)...);
+}
+template <class Recv, class C, class R, class... SlotArgs>
+result<R> invoke(const std::shared_ptr<Recv>& receiver,
+                 slots_t<R> (C::*method)(SlotArgs...), SlotArgs... args) {
+    return invoke(receiver.get(), method, std::forward<SlotArgs>(args)...);
+}
+
+/// 把无返回值任务投递到 object 所在线程（不是槽，不走 slots_t）
 inline void invoke(object* receiver, std::function<void()> fn,
                    connection_type type = connection_type::automatic) {
     if (!receiver || !fn) return;
@@ -1060,7 +1203,6 @@ inline void invoke(object* receiver, std::function<void()> fn,
             use_blocking = true;
         }
     } else if (type == connection_type::direct) {
-        // 跨线程 Direct 降级为 Queued
         use_direct = same_thread || !loop_;
     } else {
         use_direct = same_thread || !loop_;
@@ -1103,109 +1245,77 @@ void invoke(const std::weak_ptr<T>& receiver, std::function<void()> fn,
 }
 
 // =============================================================================
-// 自由函数 connect
+// 自由函数 connect（仅成员槽，必须返回 slots_t<R>）
 // =============================================================================
-template <typename... Args, typename recv, typename slot_class,
+template <typename... Args, typename recv, typename slot_class, typename R,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, recv* receiver,
-                   void (slot_class::*method)(slot_args...),
+                   slots_t<R> (slot_class::*method)(slot_args...),
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
 }
 
-template <typename... Args, typename recv, typename slot_class,
+template <typename... Args, typename recv, typename slot_class, typename R,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, recv* receiver,
-                   void (slot_class::*method)(slot_args...) const,
+                   slots_t<R> (slot_class::*method)(slot_args...) const,
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
-}
-
-template <typename... Args>
-connection connect(signal<Args...>& signal_, object* receiver,
-                   typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic,
-                   bool unique = false) {
-    return signal_.connect(receiver, std::move(slot_), type, unique);
 }
 
 template <typename... Args, typename recv, typename D, typename slot_class,
-          typename... slot_args>
+          typename R, typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::unique_ptr<recv, D>& receiver,
-                   void (slot_class::*method)(slot_args...),
+                   slots_t<R> (slot_class::*method)(slot_args...),
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
 }
 template <typename... Args, typename recv, typename D, typename slot_class,
-          typename... slot_args>
+          typename R, typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::unique_ptr<recv, D>& receiver,
-                   void (slot_class::*method)(slot_args...) const,
+                   slots_t<R> (slot_class::*method)(slot_args...) const,
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
 }
-template <typename... Args, typename recv, typename slot_class,
+template <typename... Args, typename recv, typename slot_class, typename R,
           typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::shared_ptr<recv>& receiver,
-                   void (slot_class::*method)(slot_args...),
+                   slots_t<R> (slot_class::*method)(slot_args...),
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
 }
-template <typename... Args, typename recv, typename slot_class,
+template <typename... Args, typename recv, typename slot_class, typename R,
           typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::shared_ptr<recv>& receiver,
-                   void (slot_class::*method)(slot_args...) const,
+                   slots_t<R> (slot_class::*method)(slot_args...) const,
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
 }
-template <typename... Args, typename recv, typename slot_class,
+template <typename... Args, typename recv, typename slot_class, typename R,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver,
-                   void (slot_class::*method)(slot_args...),
+                   slots_t<R> (slot_class::*method)(slot_args...),
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
 }
-template <typename... Args, typename recv, typename slot_class,
+template <typename... Args, typename recv, typename slot_class, typename R,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver,
-                   void (slot_class::*method)(slot_args...) const,
+                   slots_t<R> (slot_class::*method)(slot_args...) const,
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
-}
-
-template <typename... Args, typename recv, typename D>
-connection connect(signal<Args...>& signal_,
-                   const std::unique_ptr<recv, D>& receiver,
-                   typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic,
-                   bool unique = false) {
-    return signal_.connect(receiver, std::move(slot_), type, unique);
-}
-template <typename... Args, typename recv>
-connection connect(signal<Args...>& signal_,
-                   const std::shared_ptr<recv>& receiver,
-                   typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic,
-                   bool unique = false) {
-    return signal_.connect(receiver, std::move(slot_), type, unique);
-}
-template <typename... Args, typename recv>
-connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver,
-                   typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic,
-                   bool unique = false) {
-    return signal_.connect(receiver, std::move(slot_), type, unique);
 }
 
 }  // namespace utils

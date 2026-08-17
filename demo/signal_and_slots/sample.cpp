@@ -3,6 +3,8 @@
  * 编译: cmake --build build --target demo_signal
  *
  * 要点:
+ * - 槽必须返回 slots_t / slots_t<T>；connect / emit 丢弃返回值
+ * - 只有 invoke(成员槽) 能 get 到值（Direct / BlockingQueued）
  * - 槽接收者继承 object，才能 Queued/Auto 跨线程与析构自动断连
  * - connection_type: Direct / Queued / BlockingQueued / Auto
  * - unique 连接 / block_signals / disconnect(receiver)
@@ -32,18 +34,30 @@ public:
 
     ~window() override { invalidate(); }
 
-    void on_update_ui() {
+    void set_hits(std::atomic<int>* hits) { hits_ = hits; }
+
+    slots_t<> on_update_ui() {
         std::cout << "[" << name_ << "] UI refresh @ "
                   << std::this_thread::get_id() << "\n";
+        return {};
     }
 
-    void on_update_ui_double(const std::string& event_type) {
+    slots_t<> on_update_ui_double(const std::string& event_type) {
         std::cout << "[" << name_ << "] double(" << event_type << ") @ "
                   << std::this_thread::get_id() << "\n";
+        return {};
     }
+
+    slots_t<> on_hit() {
+        if (hits_) hits_->fetch_add(1);
+        return {};
+    }
+
+    slots_t<int> on_name_len() { return static_cast<int>(name_.size()); }
 
 private:
     std::string name_;
+    std::atomic<int>* hits_ = nullptr;
 };
 
 static void demo_cross_thread() {
@@ -52,14 +66,12 @@ static void demo_cross_thread() {
     worker_thread worker;
     worker.start();
 
-    // 无需 main_marker：object 构造已绑定主线程默认 loop
     button button;
     window win_ui("MainWindow");
     window win_worker("WorkerWindow");
 
     win_worker.move_to_thread(worker.loop());
 
-    // connect 语法糖：成员函数指针
     scoped_connection c1{
         connect(button.on_clicked, &win_ui, &window::on_update_ui)};
     scoped_connection c2{
@@ -67,15 +79,14 @@ static void demo_cross_thread() {
     connection c3 = connect(button.on_double_clicked, &win_ui,
                             &window::on_update_ui_double, connection_type::direct);
 
-    
     button.on_clicked.emit();
     button.on_double_clicked.emit("ON_DOUBLE_CLICK");
 
     std::this_thread::sleep_for(50ms);
 
     c3.disconnect();
-    (void)c1; //防止编译器警告
-    (void)c2; //防止编译器警告
+    (void)c1;
+    (void)c2;
     worker.stop();
 }
 
@@ -87,10 +98,8 @@ static void demo_lifetime() {
 
     {
         window temp("TempWindow");
-        button.on_clicked.connect(&temp, [&] {
-            hits.fetch_add(1);
-            temp.on_update_ui();
-        });
+        temp.set_hits(&hits);
+        button.on_clicked.connect(&temp, &window::on_hit);
         button.on_clicked.emit();
     }
 
@@ -121,6 +130,16 @@ static void demo_timer_and_invoke() {
         win.on_update_ui();
     });
 
+    auto len = invoke(&win, &window::on_name_len,
+                      connection_type::blocking_queued);
+    std::cout << "invoke on_name_len=";
+    if (len) {
+        std::cout << *len << " (期望 " << std::string("TimerWindow").size()
+                  << ")\n";
+    } else {
+        std::cout << "err " << len.error().message() << "\n";
+    }
+
     std::this_thread::sleep_for(120ms);
     worker.loop()->cancel_timer(tid);
     std::this_thread::sleep_for(40ms);
@@ -137,26 +156,15 @@ static void demo_blocking_queued() {
     window win("BlockingWindow");
     win.move_to_thread(worker.loop());
 
-    std::atomic<bool> done{false};
-    const auto caller = std::this_thread::get_id();
-    invoke(&win, [&] {
-        done.store(true, std::memory_order_release);
-        std::cout << "[blocking invoke] worker @ " << std::this_thread::get_id()
-                  << ", caller @ " << caller << "\n";
-    }, connection_type::blocking_queued);
-
-    std::cout << "done after invoke=" << done.load(std::memory_order_acquire)
+    auto ui = invoke(&win, &window::on_update_ui,
+                     connection_type::blocking_queued);
+    std::cout << "blocking invoke slot ok=" << static_cast<bool>(ui)
               << " (期望 1)\n";
 
     button button;
-    button.on_clicked.connect(&win, [&] {
-        done.store(true, std::memory_order_release);
-        win.on_update_ui();
-    }, connection_type::blocking_queued);
-    done.store(false, std::memory_order_release);
+    button.on_clicked.connect(&win, &window::on_update_ui,
+                              connection_type::blocking_queued);
     button.on_clicked.emit();
-    std::cout << "done after emit=" << done.load(std::memory_order_acquire)
-              << " (期望 1)\n";
 
     worker.stop();
 }
@@ -165,12 +173,14 @@ static void demo_scoped_disconnect() {
     std::cout << "\n=== 5) scoped_connection RAII ===\n";
 
     button button;
+    window win("ScopedWindow");
     std::atomic<int> hits{0};
+    win.set_hits(&hits);
 
     {
         scoped_connection sc{
-            button.on_clicked.connect([&] { hits.fetch_add(1); })};
-            button.on_clicked.emit();
+            button.on_clicked.connect(&win, &window::on_hit)};
+        button.on_clicked.emit();
     }
 
     button.on_clicked.emit();
@@ -183,6 +193,7 @@ static void demo_unique_block_disconnect() {
     button btn;
     window win("UniqueWindow");
     std::atomic<int> hits{0};
+    win.set_hits(&hits);
 
     auto c1 = connect(btn.on_clicked, &win, &window::on_update_ui,
                       connection_type::automatic, unique_connection);
@@ -190,7 +201,7 @@ static void demo_unique_block_disconnect() {
                       connection_type::automatic, unique_connection);
     std::cout << "unique second connected=" << c2.connected() << " (期望 0)\n";
 
-    btn.on_clicked.connect(&win, [&] { hits.fetch_add(1); });
+    btn.on_clicked.connect(&win, &window::on_hit);
     btn.block_signals(true);
     btn.on_clicked.emit();
     std::cout << "blocked hits=" << hits.load() << " (期望 0)\n";

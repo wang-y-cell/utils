@@ -130,13 +130,20 @@ pool.shutdown();
 **解决**：Qt 风格事件、对象线程亲和、Queued / BlockingQueued 投递。
 
 ```cpp
-class window : public utils::object { ... };
+class window : public utils::object {
+public:
+    utils::slots_t<> on_update_ui() { /* ... */ return {}; }
+    utils::slots_t<int> on_name_len() { return 11; }
+};
 connect(btn.on_clicked, &win, &window::on_update_ui);
 connect(btn.on_clicked, &win, &window::on_update_ui,
         utils::connection_type::automatic, utils::unique_connection);
+auto n = invoke(&win, &window::on_name_len);  // result<int>，仅 Direct / BlockingQueued
 btn.block_signals(true);   // 成员信号需写成 signal{this}
 btn.on_clicked.disconnect(&win);
 ```
+
+槽必须返回 `slots_t` / `slots_t<T>`，普通 `void` 函数不能 `connect`。`emit` 丢弃返回值。
 
 注意：派生类析构建议 `invalidate()`；跨线程对象先 `stop` worker。`blocking_queued` 要求目标 loop 正在 `run()`（典型是 `worker_thread`），并且互相阻塞等待时可能死锁。
 
