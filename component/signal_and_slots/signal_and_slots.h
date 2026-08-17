@@ -23,7 +23,8 @@
  *   - core_application / ensure_thread_loop：每线程默认 event_loop（仿 QThread 亲和）
  *   - connect 语法糖；emit / connect 丢弃槽返回值
  *   - invoke(槽)：Direct / BlockingQueued 用 result<T> 取回 slots_t 中的值
- *   - invoke(可调用对象)：把无返回值任务投递到目标 object 所在线程
+ *   - invoke(object*, type, fn, args...)：在目标线程调用普通函数/lambda，result 取返回值
+ *   - invoke(object*, function<void()>)：只投递无返回值任务（不取 result）
  *
  * 命名空间：utils（旧名 qto 仍可用别名兼容）
  *
@@ -1119,7 +1120,7 @@ private:
 };
 
 // =============================================================================
-// invoke：槽成员函数取返回值；或把无返回值任务投递到 object 所在线程
+// invoke：槽成员函数取返回值；普通函数/lambda 取返回值；或投递 void 任务
 // =============================================================================
 namespace detail {
 
@@ -1136,6 +1137,56 @@ struct slot_pmf_traits<slots_t<R> (C::*)(A...) const> {
     using value_type = R;
 };
 
+/// 解析 Direct / BlockingQueued；无法同步取值时返回 error
+struct invoke_route {
+    bool use_direct = false;
+    bool use_blocking = false;
+    std::errc error = std::errc{};
+    bool failed() const noexcept {
+        return error != std::errc{};
+    }
+};
+
+inline invoke_route resolve_invoke_route(object* obj, connection_type type) {
+    invoke_route r;
+    if (!obj) {
+        r.error = std::errc::invalid_argument;
+        return r;
+    }
+    event_loop* loop_ = obj->thread();
+    const bool same_thread = (loop_ == current_thread_loop());
+
+    if (type == connection_type::queued) {
+        r.error = std::errc::operation_in_progress;
+        return r;
+    }
+    if (type == connection_type::blocking_queued) {
+        if (same_thread) {
+            r.use_direct = true;
+        } else if (!loop_ || !loop_->is_running()) {
+            r.error = std::errc::operation_not_permitted;
+        } else {
+            r.use_blocking = true;
+        }
+        return r;
+    }
+    if (type == connection_type::direct) {
+        if (same_thread || !loop_) {
+            r.use_direct = true;
+        } else {
+            r.error = std::errc::operation_in_progress;
+        }
+        return r;
+    }
+    // automatic
+    if (same_thread || !loop_) {
+        r.use_direct = true;
+    } else {
+        r.error = std::errc::operation_in_progress;
+    }
+    return r;
+}
+
 template <class Recv, class Method, class... Args>
 result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
     Recv* receiver, Method method, connection_type type, Args&&... args) {
@@ -1145,35 +1196,8 @@ result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
     if (!receiver || !method) return result_err(std::errc::invalid_argument);
 
     object* obj = static_cast<object*>(receiver);
-    event_loop* loop_ = obj->thread();
-    const bool same_thread = (loop_ == current_thread_loop());
-
-    bool use_direct = false;
-    bool use_blocking = false;
-    if (type == connection_type::queued) {
-        return result_err(std::errc::operation_in_progress);
-    }
-    if (type == connection_type::blocking_queued) {
-        if (same_thread) {
-            use_direct = true;
-        } else if (!loop_ || !loop_->is_running()) {
-            return result_err(std::errc::operation_not_permitted);
-        } else {
-            use_blocking = true;
-        }
-    } else if (type == connection_type::direct) {
-        if (same_thread || !loop_) {
-            use_direct = true;
-        } else {
-            return result_err(std::errc::operation_in_progress);
-        }
-    } else {
-        if (same_thread || !loop_) {
-            use_direct = true;
-        } else {
-            return result_err(std::errc::operation_in_progress);
-        }
-    }
+    const invoke_route route = resolve_invoke_route(obj, type);
+    if (route.failed()) return result_err(route.error);
 
     auto call = [&]() -> result<R> {
         if (!obj->is_valid() || !obj->lifetime().lock()) {
@@ -1188,9 +1212,10 @@ result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
         }
     };
 
-    if (use_direct) return call();
-    if (!use_blocking) return result_err(std::errc::operation_in_progress);
+    if (route.use_direct) return call();
+    if (!route.use_blocking) return result_err(std::errc::operation_in_progress);
 
+    event_loop* loop_ = obj->thread();
     auto out = std::make_shared<result<R>>(
         result_err(std::errc::operation_canceled));
     std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
@@ -1215,6 +1240,70 @@ result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
                         return (receiver->*method)(
                                    std::forward<decltype(a)>(a)...)
                             .get();
+                    },
+                    std::move(bound_args)));
+            }
+        });
+    if (!posted) return result_err(std::errc::operation_not_permitted);
+    return std::move(*out);
+}
+
+template <class F, class... Args>
+using invoke_callable_result_t =
+    std::decay_t<std::invoke_result_t<std::decay_t<F>&, Args...>>;
+
+template <class F, class... Args>
+result<invoke_callable_result_t<F, Args...>> invoke_callable(
+    object* receiver, connection_type type, F&& fn, Args&&... args) {
+    using R = invoke_callable_result_t<F, Args...>;
+    if (!receiver) return result_err(std::errc::invalid_argument);
+
+    const invoke_route route = resolve_invoke_route(receiver, type);
+    if (route.failed()) return result_err(route.error);
+
+    auto fn_store = std::decay_t<F>(std::forward<F>(fn));
+
+    auto call = [&]() -> result<R> {
+        if (!receiver->is_valid() || !receiver->lifetime().lock()) {
+            return result_err(std::errc::owner_dead);
+        }
+        if constexpr (std::is_void_v<R>) {
+            std::invoke(fn_store, std::forward<Args>(args)...);
+            return result_ok();
+        } else {
+            return result_ok(
+                std::invoke(fn_store, std::forward<Args>(args)...));
+        }
+    };
+
+    if (route.use_direct) return call();
+    if (!route.use_blocking) return result_err(std::errc::operation_in_progress);
+
+    event_loop* loop_ = receiver->thread();
+    auto out = std::make_shared<result<R>>(
+        result_err(std::errc::operation_canceled));
+    std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
+    auto weak = receiver->lifetime();
+    const bool posted = loop_->post_blocking(
+        [fn_store = std::move(fn_store), bound_args = std::move(bound_args),
+         weak, receiver, out]() mutable {
+            if (!weak.lock() || !receiver->is_valid()) {
+                *out = result<R>(result_err(std::errc::owner_dead));
+                return;
+            }
+            if constexpr (std::is_void_v<R>) {
+                std::apply(
+                    [&](auto&&... a) {
+                        std::invoke(fn_store,
+                                    std::forward<decltype(a)>(a)...);
+                    },
+                    std::move(bound_args));
+                *out = result_ok();
+            } else {
+                *out = result_ok(std::apply(
+                    [&](auto&&... a) {
+                        return std::invoke(fn_store,
+                                           std::forward<decltype(a)>(a)...);
                     },
                     std::move(bound_args)));
             }
@@ -1277,7 +1366,62 @@ result<R> invoke(const std::shared_ptr<Recv>& receiver,
     return invoke(receiver.get(), method, std::forward<SlotArgs>(args)...);
 }
 
-/// 把无返回值任务投递到 object 所在线程（不是槽，不走 slots_t）
+/**
+ * @brief 在 receiver 所在线程调用普通函数/lambda，并用 result 取回返回值。
+ * @note 必须带 connection_type，避免与 invoke(object*, function<void()>) 投递重载冲突。
+ *       Queued / 跨线程 Auto / 跨线程 Direct 无法同步取值 → operation_in_progress。
+ */
+template <
+    class F, class... Args,
+    std::enable_if_t<
+        std::is_invocable_v<std::decay_t<F>&, Args...> &&
+            !std::is_member_pointer_v<std::decay_t<F>>,
+        int> = 0>
+auto invoke(object* receiver, connection_type type, F&& fn, Args&&... args)
+    -> result<detail::invoke_callable_result_t<F, Args...>> {
+    return detail::invoke_callable(receiver, type, std::forward<F>(fn),
+                                   std::forward<Args>(args)...);
+}
+
+template <
+    class Recv, class F, class... Args,
+    std::enable_if_t<
+        std::is_base_of_v<object, Recv> &&
+            std::is_invocable_v<std::decay_t<F>&, Args...> &&
+            !std::is_member_pointer_v<std::decay_t<F>>,
+        int> = 0>
+auto invoke(Recv* receiver, connection_type type, F&& fn, Args&&... args)
+    -> result<detail::invoke_callable_result_t<F, Args...>> {
+    return detail::invoke_callable(static_cast<object*>(receiver), type,
+                                   std::forward<F>(fn),
+                                   std::forward<Args>(args)...);
+}
+
+template <class Recv, class D, class F, class... Args,
+          std::enable_if_t<
+              std::is_invocable_v<std::decay_t<F>&, Args...> &&
+                  !std::is_member_pointer_v<std::decay_t<F>>,
+              int> = 0>
+auto invoke(const std::unique_ptr<Recv, D>& receiver, connection_type type,
+            F&& fn, Args&&... args)
+    -> result<detail::invoke_callable_result_t<F, Args...>> {
+    return invoke(receiver.get(), type, std::forward<F>(fn),
+                  std::forward<Args>(args)...);
+}
+
+template <class Recv, class F, class... Args,
+          std::enable_if_t<
+              std::is_invocable_v<std::decay_t<F>&, Args...> &&
+                  !std::is_member_pointer_v<std::decay_t<F>>,
+              int> = 0>
+auto invoke(const std::shared_ptr<Recv>& receiver, connection_type type, F&& fn,
+            Args&&... args)
+    -> result<detail::invoke_callable_result_t<F, Args...>> {
+    return invoke(receiver.get(), type, std::forward<F>(fn),
+                  std::forward<Args>(args)...);
+}
+
+/// 把无返回值任务投递到 object 所在线程（不是槽，不走 slots_t，不返回 result）
 inline void invoke(object* receiver, std::function<void()> fn,
                    connection_type type = connection_type::automatic) {
     if (!receiver || !fn) return;

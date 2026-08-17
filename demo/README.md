@@ -23,7 +23,7 @@ cmake --build build --target demo_expected
 |------|------|
 | `adapter/` | 门面：`config` / `log` / `executor` / `sql` |
 | `component/` | 功能组件：`expected`、`thread_pool`、`channel` 等 |
-| `docs/adapter-plan.md` | 后续可新增门面的规划 |
+| `docs/` | API 文档中心：见 [`docs/README.md`](../docs/README.md) |
 
 ---
 

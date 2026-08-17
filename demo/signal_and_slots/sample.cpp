@@ -109,6 +109,8 @@ static void demo_lifetime() {
     std::cout << "hits=" << hits.load() << " (期望 1)\n";
 }
 
+static int free_add(int a, int b) { return a + b; }
+
 static void demo_timer_and_invoke() {
     std::cout << "\n=== 3) 定时器 + invoke ===\n";
 
@@ -140,6 +142,23 @@ static void demo_timer_and_invoke() {
                   << ")\n";
     } else {
         std::cout << "err " << len.error().message() << "\n";
+    }
+
+    auto sum = invoke(&win, connection_type::blocking_queued, free_add, 40, 2);
+    std::cout << "invoke free_add=";
+    if (sum) {
+        std::cout << *sum << " (期望 42)\n";
+    } else {
+        std::cout << "err " << sum.error().message() << "\n";
+    }
+
+    auto doubled = invoke(&win, connection_type::blocking_queued,
+                          [](int x) { return x * 2; }, 21);
+    std::cout << "invoke lambda=";
+    if (doubled) {
+        std::cout << *doubled << " (期望 42)\n";
+    } else {
+        std::cout << "err " << doubled.error().message() << "\n";
     }
 
     std::this_thread::sleep_for(120ms);
