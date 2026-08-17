@@ -5,6 +5,7 @@
  * 要点:
  * - 槽接收者继承 object，才能 Queued/Auto 跨线程与析构自动断连
  * - connection_type: Direct / Queued / BlockingQueued / Auto
+ * - unique 连接 / block_signals / disconnect(receiver)
  * - scoped_connection RAII；worker_thread + invoke / 定时器
  */
 
@@ -21,9 +22,8 @@ using namespace std::chrono_literals;
 
 class button : public object {
 public:
-    signal<> on_clicked;
-    signal<std::string> on_double_clicked;
-
+    signal<> on_clicked{this};
+    signal<std::string> on_double_clicked{this};
 };
 
 class window : public object {
@@ -177,6 +177,35 @@ static void demo_scoped_disconnect() {
     std::cout << "hits=" << hits.load() << " (期望 1)\n";
 }
 
+static void demo_unique_block_disconnect() {
+    std::cout << "\n=== 6) unique / block_signals / disconnect(receiver) ===\n";
+
+    button btn;
+    window win("UniqueWindow");
+    std::atomic<int> hits{0};
+
+    auto c1 = connect(btn.on_clicked, &win, &window::on_update_ui,
+                      connection_type::automatic, unique_connection);
+    auto c2 = connect(btn.on_clicked, &win, &window::on_update_ui,
+                      connection_type::automatic, unique_connection);
+    std::cout << "unique second connected=" << c2.connected() << " (期望 0)\n";
+
+    btn.on_clicked.connect(&win, [&] { hits.fetch_add(1); });
+    btn.block_signals(true);
+    btn.on_clicked.emit();
+    std::cout << "blocked hits=" << hits.load() << " (期望 0)\n";
+
+    btn.block_signals(false);
+    btn.on_clicked.emit();
+    std::cout << "unblocked hits=" << hits.load() << " (期望 1)\n";
+
+    btn.on_clicked.disconnect(&win);
+    btn.on_clicked.emit();
+    std::cout << "after disconnect(receiver) hits=" << hits.load()
+              << " (期望 1)\n";
+    (void)c1;
+}
+
 int main() {
     core_application app;  // 主线程注册默认 event_loop（仿 QCoreApplication）
 
@@ -185,6 +214,7 @@ int main() {
     demo_timer_and_invoke();
     demo_blocking_queued();
     demo_scoped_disconnect();
+    demo_unique_block_disconnect();
     std::cout << "\n全部示例结束。\n";
     return 0;
 }

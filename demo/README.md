@@ -132,9 +132,10 @@ pool.shutdown();
 ```cpp
 class window : public utils::object { ... };
 connect(btn.on_clicked, &win, &window::on_update_ui);
-// 槽类需继承 object 才能跨线程 / 自动断连
-signal.connect([] { ... });  // 无 receiver：仅 Direct
-utils::invoke(&win, [] { ... }, utils::connection_type::blocking_queued);
+connect(btn.on_clicked, &win, &window::on_update_ui,
+        utils::connection_type::automatic, utils::unique_connection);
+btn.block_signals(true);   // 成员信号需写成 signal{this}
+btn.on_clicked.disconnect(&win);
 ```
 
 注意：派生类析构建议 `invalidate()`；跨线程对象先 `stop` worker。`blocking_queued` 要求目标 loop 正在 `run()`（典型是 `worker_thread`），并且互相阻塞等待时可能死锁。

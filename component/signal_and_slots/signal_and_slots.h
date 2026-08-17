@@ -9,6 +9,9 @@
  *
  * 能力：
  *   - connection_type: Direct / Queued / BlockingQueued / Auto
+ *   - unique 连接：同一接收者 + 同一成员槽只连一次（lambda 无法可靠去重）
+ *   - object::block_signals：批量改状态时暂停该对象发出的信号（信号需 signal{this}）
+ *   - signal::disconnect(receiver)：按接收者断开
  *   - connection / scoped_connection（可断开、RAII）
  *   - object 析构自动断开入站连接，槽内校验存活，避免悬空
  *   - object::delete_later + object_uptr / object_sptr / object_wptr
@@ -45,6 +48,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -57,6 +61,8 @@ enum class connection_type {
     blocking_queued,  // 跨线程投递并等待目标线程执行完成（要求目标 loop 正在 run）
     automatic     // 同线程 Direct，跨线程 Queued
 };
+
+inline constexpr bool unique_connection = true;
 
 class event_loop;
 class object;
@@ -548,6 +554,14 @@ public:
         return _valid.load(std::memory_order_acquire);
     }
 
+    /// 暂停/恢复本对象作为发送者发出的信号。成员信号需写成 signal{this}。
+    void block_signals(bool block) noexcept {
+        _signals_blocked.store(block, std::memory_order_release);
+    }
+    [[nodiscard]] bool signals_blocked() const noexcept {
+        return _signals_blocked.load(std::memory_order_acquire);
+    }
+
     /** @brief 跟踪入站连接,将连接状态添加到_inbound中 */
     void track_inbound(const std::shared_ptr<connection_state>& state) {
         std::lock_guard<std::mutex> lock(_inbound_mutex);
@@ -569,6 +583,7 @@ private:
     std::atomic<event_loop*> _loop{nullptr};
     std::shared_ptr<void> _alive;
     std::atomic<bool> _valid{true};
+    std::atomic<bool> _signals_blocked{false};
     mutable std::mutex _inbound_mutex;
     std::vector<std::shared_ptr<connection_state>> _inbound;
 };
@@ -628,46 +643,65 @@ public:
     using slot = std::function<void(Args...)>;
 
     signal() = default;
+    explicit signal(object* owner) noexcept
+        : _owner(owner), _owner_alive(owner ? owner->lifetime() : std::weak_ptr<void>{}) {}
     signal(const signal&) = delete;
     signal& operator=(const signal&) = delete;
 
     ~signal() { disconnect_all(); }
 
+    void block_signals(bool block) noexcept {
+        _blocked.store(block, std::memory_order_release);
+    }
+    [[nodiscard]] bool signals_blocked() const noexcept {
+        if (_blocked.load(std::memory_order_acquire)) return true;
+        if (!_owner) return false;
+        auto gate = _owner_alive.lock();
+        if (!gate) return true;
+        return _owner->signals_blocked();
+    }
+
     /// 绑定到 receiver：支持 Auto/Queued/Direct；receiver 析构自动断开
     connection connect(object* receiver, slot slot_,
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         if (!slot_) return {};
-        return add_connection(receiver, std::move(slot_), type);
+        slot_key key = make_functor_key(receiver, slot_);
+        return add_connection(receiver, std::move(slot_), type, unique, key);
     }
 
     /// 语法糖：成员函数槽 connect(recv, &recv::method)
     template <typename recv, typename slot_class, typename... slot_args>
     connection connect(recv* receiver, void (slot_class::*method)(slot_args...),
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         static_assert(std::is_base_of_v<object, recv>,
                       "receiver must derive from utils::object");
         if (!receiver || !method) return {};
-        return connect(
-            static_cast<object*>(receiver),
+        object* obj = static_cast<object*>(receiver);
+        return add_connection(
+            obj,
             [receiver, method](const Args&... args) {
                 (receiver->*method)(args...);
             },
-            type);
+            type, unique, make_pmf_key(obj, method));
     }
 
     template <typename recv, typename slot_class, typename... slot_args>
     connection connect(recv* receiver,
                        void (slot_class::*method)(slot_args...) const,
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         static_assert(std::is_base_of_v<object, recv>,
                       "receiver must derive from utils::object");
         if (!receiver || !method) return {};
-        return connect(
-            static_cast<object*>(receiver),
+        object* obj = static_cast<object*>(receiver);
+        return add_connection(
+            obj,
             [receiver, method](const Args&... args) {
                 (receiver->*method)(args...);
             },
-            type);
+            type, unique, make_pmf_key(obj, method));
     }
 
     /// 智能指针语法糖（非拥有：不因连接持有 shared 延长寿命）
@@ -675,69 +709,117 @@ public:
               typename... slot_args>
     connection connect(const std::unique_ptr<recv, D>& receiver,
                        void (slot_class::*method)(slot_args...),
-                       connection_type type = connection_type::automatic) {
-        return connect(receiver.get(), method, type);
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect(receiver.get(), method, type, unique);
     }
     template <typename recv, typename D, typename slot_class,
               typename... slot_args>
     connection connect(const std::unique_ptr<recv, D>& receiver,
                        void (slot_class::*method)(slot_args...) const,
-                       connection_type type = connection_type::automatic) {
-        return connect(receiver.get(), method, type);
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect(receiver.get(), method, type, unique);
     }
     template <typename recv, typename slot_class, typename... slot_args>
     connection connect(const std::shared_ptr<recv>& receiver,
                        void (slot_class::*method)(slot_args...),
-                       connection_type type = connection_type::automatic) {
-        return connect(receiver.get(), method, type);
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect(receiver.get(), method, type, unique);
     }
     template <typename recv, typename slot_class, typename... slot_args>
     connection connect(const std::shared_ptr<recv>& receiver,
                        void (slot_class::*method)(slot_args...) const,
-                       connection_type type = connection_type::automatic) {
-        return connect(receiver.get(), method, type);
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect(receiver.get(), method, type, unique);
     }
     template <typename recv, typename slot_class, typename... slot_args>
     connection connect(const std::weak_ptr<recv>& receiver,
                        void (slot_class::*method)(slot_args...),
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         auto locked = receiver.lock();
-        return connect(locked.get(), method, type);
+        return connect(locked.get(), method, type, unique);
     }
     template <typename recv, typename slot_class, typename... slot_args>
     connection connect(const std::weak_ptr<recv>& receiver,
                        void (slot_class::*method)(slot_args...) const,
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         auto locked = receiver.lock();
-        return connect(locked.get(), method, type);
+        return connect(locked.get(), method, type, unique);
     }
     template <typename recv, typename D>
     connection connect(const std::unique_ptr<recv, D>& receiver, slot slot_,
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         return connect(static_cast<object*>(receiver.get()), std::move(slot_),
-                       type);
+                       type, unique);
     }
     template <typename recv>
     connection connect(const std::shared_ptr<recv>& receiver, slot slot_,
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         return connect(static_cast<object*>(receiver.get()), std::move(slot_),
-                       type);
+                       type, unique);
     }
     template <typename recv>
     connection connect(const std::weak_ptr<recv>& receiver, slot slot_,
-                       connection_type type = connection_type::automatic) {
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
         auto locked = receiver.lock();
         return connect(static_cast<object*>(locked.get()), std::move(slot_),
-                       type);
+                       type, unique);
     }
 
     /// 无 receiver：始终在 emit 线程 Direct 调用（注意捕获对象生命周期）
-    connection connect(slot slot_) {
+    connection connect(slot slot_, bool unique = false) {
         if (!slot_) return {};
-        return add_connection(nullptr, std::move(slot_), connection_type::direct);
+        slot_key key = make_functor_key(nullptr, slot_);
+        return add_connection(nullptr, std::move(slot_), connection_type::direct,
+                              unique, key);
     }
 
     void disconnect(connection& c) { c.disconnect(); }
+
+    /// 断开该接收者在本信号上的全部连接
+    void disconnect(object* receiver) {
+        if (!receiver) return;
+        std::vector<std::shared_ptr<connection_state>> states;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            for (auto& e : _entries) {
+                if (e._receiver != receiver || !e._state) continue;
+                if (e._state->_alive.exchange(false, std::memory_order_acq_rel)) {
+                    states.push_back(e._state);
+                }
+            }
+            _entries.erase(
+                std::remove_if(_entries.begin(), _entries.end(),
+                               [receiver](const entry& e) {
+                                   return e._receiver == receiver;
+                               }),
+                _entries.end());
+        }
+        for (auto& s : states) {
+            if (s && s->_disconnect_fn) s->_disconnect_fn();
+        }
+    }
+    template <typename recv, typename D>
+    void disconnect(const std::unique_ptr<recv, D>& receiver) {
+        disconnect(static_cast<object*>(receiver.get()));
+    }
+    template <typename recv>
+    void disconnect(const std::shared_ptr<recv>& receiver) {
+        disconnect(static_cast<object*>(receiver.get()));
+    }
+    template <typename recv>
+    void disconnect(const std::weak_ptr<recv>& receiver) {
+        auto locked = receiver.lock();
+        disconnect(static_cast<object*>(locked.get()));
+    }
 
     void disconnect_all() {
         std::vector<std::shared_ptr<connection_state>> states;
@@ -757,6 +839,7 @@ public:
     }
 
     void emit(const Args&... args) const {
+        if (signals_blocked()) return;
         // 复用 thread_local 容量，避免每次 emit 堆分配；swap 以支持同线程重入 emit
         thread_local std::vector<entry> tls_scratch;
         std::vector<entry> snapshot;
@@ -847,22 +930,86 @@ public:
     void operator()(const Args&... args) const { emit(args...); }
 
 private:
+    struct slot_key {
+        object* receiver = nullptr;
+        const std::type_info* pmf_type = nullptr;
+        std::shared_ptr<void> pmf;
+        bool (*equal)(const void*, const void*) = nullptr;
+
+        bool matches(const slot_key& other) const noexcept {
+            if (receiver != other.receiver || !equal || !other.equal) {
+                return false;
+            }
+            if (pmf_type != other.pmf_type || !pmf || !other.pmf) return false;
+            return equal(pmf.get(), other.pmf.get());
+        }
+    };
+
     struct entry {
         std::shared_ptr<connection_state> _state;
         object* _receiver = nullptr; //接收信号的object对象
         std::weak_ptr<void> _receiver_alive; //接收信号的object对象是否存活
         slot _slot;
         connection_type _type = connection_type::automatic;
+        slot_key _key;
     };
 
+    template <class M>
+    static slot_key make_pmf_key(object* receiver, M method) {
+        slot_key key;
+        key.receiver = receiver;
+        key.pmf_type = &typeid(M);
+        key.pmf = std::make_shared<M>(method);
+        key.equal = [](const void* a, const void* b) {
+            return *static_cast<const M*>(a) == *static_cast<const M*>(b);
+        };
+        return key;
+    }
+
+    static slot_key make_functor_key(object* receiver, const slot& slot_) {
+        slot_key key;
+        key.receiver = receiver;
+        using fp = void (*)(Args...);
+        if (auto* p = slot_.template target<fp>()) {
+            key.pmf_type = &typeid(fp);
+            key.pmf = std::make_shared<fp>(*p);
+            key.equal = [](const void* a, const void* b) {
+                return *static_cast<const fp*>(a) == *static_cast<const fp*>(b);
+            };
+        }
+        return key;
+    }
+
     connection add_connection(object* receiver, slot slot_,
-                              connection_type type) {
+                              connection_type type, bool unique,
+                              slot_key key) {
         auto state = std::make_shared<connection_state>();
         std::uint64_t id = 0;
         {
             std::lock_guard<std::mutex> lock(_mutex);
+            if (unique && key.equal) {
+                for (const auto& e : _entries) {
+                    if (e._state &&
+                        e._state->_alive.load(std::memory_order_acquire) &&
+                        e._key.matches(key)) {
+                        return {};
+                    }
+                }
+            }
             id = _next_id++;
             state->_id = id;
+            state->_disconnect_fn = [this, id, receiver]() {
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    _entries.erase(
+                        std::remove_if(_entries.begin(), _entries.end(),
+                                       [id](const entry& e) {
+                                           return e._state && e._state->_id == id;
+                                       }),
+                        _entries.end());
+                }
+                if (receiver) receiver->untrack_inbound(id);
+            };
 
             entry e;
             e._state = state;
@@ -872,21 +1019,9 @@ private:
                                          : std::weak_ptr<void>(_forever);
             e._slot = std::move(slot_);
             e._type = type;
+            e._key = std::move(key);
             _entries.push_back(std::move(e));
         }
-
-        state->_disconnect_fn = [this, id, receiver]() {
-            {
-                std::lock_guard<std::mutex> lock(_mutex);
-                _entries.erase(
-                    std::remove_if(_entries.begin(), _entries.end(),
-                                   [id](const entry& e) {
-                                       return e._state && e._state->_id == id;
-                                   }),
-                    _entries.end());
-            }
-            if (receiver) receiver->untrack_inbound(id);
-        };
 
         if (receiver) receiver->track_inbound(state); //如果receiver不为空，则将连接状态添加到_inbound中
         return connection{std::move(state)};
@@ -895,6 +1030,9 @@ private:
     mutable std::mutex _mutex;
     std::vector<entry> _entries; //这个信号有多少槽函数连接
     std::uint64_t _next_id = 1;
+    object* _owner = nullptr;
+    std::weak_ptr<void> _owner_alive;
+    std::atomic<bool> _blocked{false};
     // 无 receiver 连接的存活哨兵
     std::shared_ptr<void> _forever = std::make_shared<char>('\0');
 };
@@ -971,23 +1109,26 @@ template <typename... Args, typename recv, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, recv* receiver,
                    void (slot_class::*method)(slot_args...),
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 
 template <typename... Args, typename recv, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, recv* receiver,
                    void (slot_class::*method)(slot_args...) const,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 
 template <typename... Args>
 connection connect(signal<Args...>& signal_, object* receiver,
                    typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, std::move(slot_), type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::move(slot_), type, unique);
 }
 
 template <typename... Args, typename recv, typename D, typename slot_class,
@@ -995,67 +1136,76 @@ template <typename... Args, typename recv, typename D, typename slot_class,
 connection connect(signal<Args...>& signal_,
                    const std::unique_ptr<recv, D>& receiver,
                    void (slot_class::*method)(slot_args...),
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 template <typename... Args, typename recv, typename D, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::unique_ptr<recv, D>& receiver,
                    void (slot_class::*method)(slot_args...) const,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 template <typename... Args, typename recv, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::shared_ptr<recv>& receiver,
                    void (slot_class::*method)(slot_args...),
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 template <typename... Args, typename recv, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_,
                    const std::shared_ptr<recv>& receiver,
                    void (slot_class::*method)(slot_args...) const,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 template <typename... Args, typename recv, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver,
                    void (slot_class::*method)(slot_args...),
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 template <typename... Args, typename recv, typename slot_class,
           typename... slot_args>
 connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver,
                    void (slot_class::*method)(slot_args...) const,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, method, type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, method, type, unique);
 }
 
 template <typename... Args, typename recv, typename D>
 connection connect(signal<Args...>& signal_,
                    const std::unique_ptr<recv, D>& receiver,
                    typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, std::move(slot_), type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::move(slot_), type, unique);
 }
 template <typename... Args, typename recv>
 connection connect(signal<Args...>& signal_,
                    const std::shared_ptr<recv>& receiver,
                    typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, std::move(slot_), type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::move(slot_), type, unique);
 }
 template <typename... Args, typename recv>
 connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver,
                    typename signal<Args...>::slot slot_,
-                   connection_type type = connection_type::automatic) {
-    return signal_.connect(receiver, std::move(slot_), type);
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::move(slot_), type, unique);
 }
 
 }  // namespace utils
