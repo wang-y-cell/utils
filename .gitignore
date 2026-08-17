@@ -2,6 +2,8 @@ build/
 main.cpp
 libpath/
 cmake/
+.vscode/
+.cache/
 
 *.exe
 *.dll

@@ -4,7 +4,7 @@
  *
  * 要点:
  * - 槽接收者继承 object，才能 Queued/Auto 跨线程与析构自动断连
- * - connection_type: Direct / Queued / Auto
+ * - connection_type: Direct / Queued / BlockingQueued / Auto
  * - scoped_connection RAII；worker_thread + invoke / 定时器
  */
 
@@ -128,8 +128,41 @@ static void demo_timer_and_invoke() {
     std::cout << "timer ticks=" << ticks.load() << " (期望约 3~4)\n";
 }
 
+static void demo_blocking_queued() {
+    std::cout << "\n=== 4) blocking_queued：等待目标线程执行完成 ===\n";
+
+    worker_thread worker;
+    worker.start();
+
+    window win("BlockingWindow");
+    win.move_to_thread(worker.loop());
+
+    std::atomic<bool> done{false};
+    const auto caller = std::this_thread::get_id();
+    invoke(&win, [&] {
+        done.store(true, std::memory_order_release);
+        std::cout << "[blocking invoke] worker @ " << std::this_thread::get_id()
+                  << ", caller @ " << caller << "\n";
+    }, connection_type::blocking_queued);
+
+    std::cout << "done after invoke=" << done.load(std::memory_order_acquire)
+              << " (期望 1)\n";
+
+    button button;
+    button.on_clicked.connect(&win, [&] {
+        done.store(true, std::memory_order_release);
+        win.on_update_ui();
+    }, connection_type::blocking_queued);
+    done.store(false, std::memory_order_release);
+    button.on_clicked.emit();
+    std::cout << "done after emit=" << done.load(std::memory_order_acquire)
+              << " (期望 1)\n";
+
+    worker.stop();
+}
+
 static void demo_scoped_disconnect() {
-    std::cout << "\n=== 4) scoped_connection RAII ===\n";
+    std::cout << "\n=== 5) scoped_connection RAII ===\n";
 
     button button;
     std::atomic<int> hits{0};
@@ -150,6 +183,7 @@ int main() {
     demo_cross_thread();
     demo_lifetime();
     demo_timer_and_invoke();
+    demo_blocking_queued();
     demo_scoped_disconnect();
     std::cout << "\n全部示例结束。\n";
     return 0;

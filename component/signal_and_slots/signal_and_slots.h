@@ -8,7 +8,7 @@
  *   using namespace utils;
  *
  * 能力：
- *   - connection_type: Direct / Queued / Auto
+ *   - connection_type: Direct / Queued / BlockingQueued / Auto
  *   - connection / scoped_connection（可断开、RAII）
  *   - object 析构自动断开入站连接，槽内校验存活，避免悬空
  *   - object::delete_later + object_uptr / object_sptr / object_wptr
@@ -25,7 +25,8 @@
  *   1) 跨线程 object 销毁前先 worker_thread::stop() / 排空队列
  *   2) 派生类若可能被跨线程回调，析构函数第一行调用 invalidate()
  *       （堆对象优先 object_uptr / delete_later，可减少手动 invalidate）
- *   3) 跨线程 Direct 会自动降级为 Queued；Queued 且无 loop 则丢弃
+ *   3) 跨线程 Direct 会自动降级为 Queued；Queued/BlockingQueued 无 loop 则丢弃
+ *      BlockingQueued 要求目标 loop 正在 run（例如 worker_thread）；循环阻塞等待可能导致死锁
  *   4) 禁止在工作线程里调用 worker_thread::stop() 期望 join 自己
  *   5) 主线程建议先构造 core_application（或依赖 object 内 ensure_thread_loop）
  *   6) 堆上 object 建议只用 object_uptr/object_sptr 拥有；connect 仅观察不延长寿命
@@ -35,6 +36,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -52,6 +54,7 @@ namespace utils {
 enum class connection_type {
     direct,  // 同步：在 emit 所在线程执行
     queued,  // 异步：投递到接收者所属 event_loop
+    blocking_queued,  // 跨线程投递并等待目标线程执行完成（要求目标 loop 正在 run）
     automatic     // 同线程 Direct，跨线程 Queued
 };
 
@@ -60,7 +63,7 @@ class object;
 
 // 线程默认 loop（亲和身份，可不 run）
 inline thread_local event_loop* tls_default_loop = nullptr;
-// 当前正在 run/process_events 的 loop
+// 描述的是本线程是否有正在run的event_loop对象
 inline thread_local event_loop* tls_running_loop = nullptr;
 
 /// 当前线程 loop：优先返回正在泵的，否则返回默认亲和 loop
@@ -89,13 +92,42 @@ public:
 
     /** @brief 将任务添加到任务队列中 */
     void post(task task_) {
-        if (!task_) return;
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            if (!_running) return;
-            _tasks.push(std::move(task_));
+        (void)post_impl(std::move(task_));
+    }
+
+    /**
+     *@brief 将阻塞任务添加到队列中，添加成功则返回true，否则返回false
+     * 此函数会阻塞，直到任务执行完成
+     *@param task_ 阻塞任务
+     *@return 添加成功则返回true，否则返回false
+    */
+    bool post_blocking(task task_) {
+        if (!task_) return false;
+        auto state = std::make_shared<blocking_post_state>();
+        //将阻塞任务添加到队列中，添加成功则返回true，否则返回false
+        if (!post_impl([task_ = std::move(task_), state]() mutable {
+                try {
+                    task_();
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    state->error = std::current_exception();
+                    state->done = true;
+                    state->cv.notify_one();
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->done = true;
+                state->cv.notify_one();
+            })) {
+            return false;
         }
-        _cv.notify_one();
+        {
+            //阻塞任务会在任务执行结束的时候将条件变量设置为true，然后通知主线程
+            std::unique_lock<std::mutex> lock(state->mutex);
+            state->cv.wait(lock, [&] { return state->done; });
+        }
+        if (state->error) std::rethrow_exception(state->error);
+        return true;
     }
 
     /// 延迟执行。delay <= 0 等价于 post。返回可用 cancel_timer 取消的 id（post 路径为 0）。
@@ -216,6 +248,13 @@ public:
     }
 
 private:
+    struct blocking_post_state {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool done = false;
+        std::exception_ptr error;
+    };
+
     struct timer_item {
         clock::time_point _when;
         timer_id _id;
@@ -267,6 +306,17 @@ private:
         }
     }
 
+    bool post_impl(task task_) {
+        if (!task_) return false;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (!_running) return false;
+            _tasks.push(std::move(task_));
+        }
+        _cv.notify_one();
+        return true;
+    }
+
     mutable std::mutex _mutex;
     std::condition_variable _cv;
     std::queue<task> _tasks;
@@ -278,12 +328,18 @@ private:
     timer_id _next_timer_id = 1;
 };
 
-/// 保证当前线程有默认 event_loop（用作线程令牌 / 亲和）
+/// 保证当前线程有默认 event_loop（用作线程令牌 / 亲和），如果是第一次创建则创建一个event_loop对象
+/// 这个event_loop对象在当前线程中是唯一的，不会被其他线程共享
 inline event_loop* ensure_thread_loop() {
+    //如果当前线程已经绑定了默认loop，则返回当前线程绑定的默认loop
     if (tls_default_loop) return tls_default_loop;
+    //定义当前线程的静态智能指针对象
     static thread_local std::unique_ptr<event_loop> owned;
+    //如果当前的loop指针是第一次创建，则创建一个event_loop对象
     if (!owned) owned = std::make_unique<event_loop>();
+    //将当前默认线程loop指针设置为当前线程绑定的默认loop
     tls_default_loop = owned.get();
+    //返回当前线程绑定的默认loop
     return tls_default_loop;
 }
 
@@ -317,8 +373,8 @@ public:
 
     void start() {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (_thread.joinable()) return;
-        _loop = std::make_unique<event_loop>();
+        if (_thread.joinable()) return; //如果当前的线程是活跃状态，则直接返回
+        _loop = std::make_unique<event_loop>(); //否则创建一个loop对象
         event_loop* loop_ = _loop.get();
         _thread = std::thread([loop_]() {
             tls_default_loop = loop_;  // 工作线程亲和 = 该 loop
@@ -425,6 +481,10 @@ class object {
 public:
     object() : _alive(std::make_shared<char>('\0')) {
         // 构造时自动绑定当前线程默认 loop（仿 QObject 线程亲和）
+        // 如果main函数创建core_application对象，当前_loop指向的是main线程
+        // 如果main函数没有创建core_application对象，你创建一个继承object的类时
+        // 只要这个对象在main线程中创建，_loop指向的就是main线程的loop
+        // 如果此对象在其他线程中创建，_loop指向的就是其他线程的loop
         _loop.store(ensure_thread_loop(), std::memory_order_release);
     }
 
@@ -452,6 +512,7 @@ public:
         }
     }
 
+    ///将当前对象所处的线程切换成loop_
     void move_to_thread(event_loop* loop_) noexcept {
         _loop.store(loop_, std::memory_order_release);
     }
@@ -725,24 +786,45 @@ public:
 
             const bool same_thread = (target_loop == current_thread_loop());
 
-            // Direct 跨线程 → 降级 Queued；Queued 无 loop → 丢弃（不静默 Direct）
+            // Direct 跨线程 → 降级 Queued；BlockingQueued 仅在目标 loop 正在泵时等待
             bool use_direct = false;
+            bool use_blocking = false;
             if (e._type == connection_type::queued) {
                 if (!target_loop) continue;
                 use_direct = false;
+            } else if (e._type == connection_type::blocking_queued) {
+                if (same_thread) {
+                    use_direct = true;
+                } else if (!target_loop || !target_loop->is_running()) {
+                    continue;
+                } else {
+                    use_blocking = true;
+                }
             } else if (e._type == connection_type::direct) {
                 if (same_thread || !target_loop) {
                     use_direct = true;
                 } else {
                     use_direct = false;  // 跨线程 Direct 降级
                 }
-            } else {  // Auto
+            } else {  // Auto, 如果在同一个线程中，或者当前没有设置loop线程
                 use_direct = same_thread || !target_loop;
             }
 
             if (use_direct) {
                 if (e._receiver && e._receiver_alive.expired()) continue;
                 e._slot(args...);
+            } else if (use_blocking) {
+                if (!target_loop) continue;
+                auto bound_slot = e._slot;
+                auto bound_args = std::make_tuple(args...);
+                auto weak = e._receiver_alive;
+                target_loop->post_blocking(
+                    [bound_slot = std::move(bound_slot),
+                     bound_args = std::move(bound_args),
+                     weak = std::move(weak)]() mutable {
+                        if (!weak.lock()) return;
+                        std::apply(bound_slot, std::move(bound_args));
+                    });
             } else {
                 if (!target_loop) continue;
                 auto bound_slot = e._slot;
@@ -828,8 +910,17 @@ inline void invoke(object* receiver, std::function<void()> fn,
     const bool same_thread = (loop_ == current_thread_loop());
 
     bool use_direct = false;
+    bool use_blocking = false;
     if (type == connection_type::queued) {
         if (!loop_) return;
+    } else if (type == connection_type::blocking_queued) {
+        if (same_thread) {
+            use_direct = true;
+        } else if (!loop_ || !loop_->is_running()) {
+            return;
+        } else {
+            use_blocking = true;
+        }
     } else if (type == connection_type::direct) {
         // 跨线程 Direct 降级为 Queued
         use_direct = same_thread || !loop_;
@@ -845,10 +936,15 @@ inline void invoke(object* receiver, std::function<void()> fn,
     if (!loop_) return;
 
     auto weak = receiver->lifetime();
-    loop_->post([weak = std::move(weak), fn = std::move(fn)]() mutable {
+    auto wrapped = [weak = std::move(weak), fn = std::move(fn)]() mutable {
         if (!weak.lock()) return;
         fn();
-    });
+    };
+    if (use_blocking) {
+        loop_->post_blocking(std::move(wrapped));
+    } else {
+        loop_->post(std::move(wrapped));
+    }
 }
 
 template <typename T, typename D>

@@ -127,16 +127,17 @@ pool.shutdown();
 
 ## 6. signal_and_slots — 跨线程信号槽
 
-**解决**：Qt 风格事件、对象线程亲和、Queued 投递。
+**解决**：Qt 风格事件、对象线程亲和、Queued / BlockingQueued 投递。
 
 ```cpp
 class window : public utils::object { ... };
 connect(btn.on_clicked, &win, &window::on_update_ui);
 // 槽类需继承 object 才能跨线程 / 自动断连
 signal.connect([] { ... });  // 无 receiver：仅 Direct
+utils::invoke(&win, [] { ... }, utils::connection_type::blocking_queued);
 ```
 
-注意：派生类析构建议 `invalidate()`；跨线程对象先 `stop` worker。
+注意：派生类析构建议 `invalidate()`；跨线程对象先 `stop` worker。`blocking_queued` 要求目标 loop 正在 `run()`（典型是 `worker_thread`），并且互相阻塞等待时可能死锁。
 
 ---
 
