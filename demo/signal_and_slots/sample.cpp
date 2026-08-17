@@ -3,12 +3,13 @@
  * 编译: cmake --build build --target demo_signal
  *
  * 要点:
- * - 槽必须返回 slots_t / slots_t<T>；connect / emit 丢弃返回值
+ * - 成员槽必须返回 slots_t / slots_t<T>；也可 connect(receiver, lambda)
  * - 只有 invoke(成员槽) 能 get 到值（Direct / BlockingQueued）
- * - 槽接收者继承 object，才能 Queued/Auto 跨线程与析构自动断连
+ * - 槽接收者继承 object；派生析构第一行 invalidate()（同亲和会排空队列）
  * - connection_type: Direct / Queued / BlockingQueued / Auto
  * - unique 连接 / block_signals / disconnect(receiver)
  * - scoped_connection RAII；worker_thread + invoke / 定时器
+ * - 禁止在工作线程内调用 worker_thread::stop()
  */
 
 #include "component/signal_and_slots/signal_and_slots.h"
@@ -32,6 +33,7 @@ class window : public object {
 public:
     explicit window(std::string name) : name_(std::move(name)) {}
 
+    // 派生析构第一行必须 invalidate（断连 + 同亲和 process_events 排空）
     ~window() override { invalidate(); }
 
     void set_hits(std::atomic<int>* hits) { hits_ = hits; }
@@ -217,6 +219,28 @@ static void demo_unique_block_disconnect() {
     (void)c1;
 }
 
+static void demo_lambda_connect() {
+    std::cout << "\n=== 7) connect(receiver, lambda) ===\n";
+
+    button btn;
+    window win("LambdaWindow");
+    std::atomic<int> hits{0};
+
+    scoped_connection sc{connect(btn.on_clicked, &win, [&] {
+        hits.fetch_add(1);
+        std::cout << "[lambda] hit @ " << std::this_thread::get_id() << "\n";
+    })};
+
+    scoped_connection sc2{btn.on_double_clicked.connect(
+        &win, [&](const std::string& s) {
+            std::cout << "[lambda] double args=" << s << "\n";
+        })};
+
+    btn.on_clicked.emit();
+    btn.on_double_clicked.emit("from-lambda");
+    std::cout << "lambda hits=" << hits.load() << " (期望 1)\n";
+}
+
 int main() {
     core_application app;  // 主线程注册默认 event_loop（仿 QCoreApplication）
 
@@ -226,6 +250,7 @@ int main() {
     demo_blocking_queued();
     demo_scoped_disconnect();
     demo_unique_block_disconnect();
+    demo_lambda_connect();
     std::cout << "\n全部示例结束。\n";
     return 0;
 }

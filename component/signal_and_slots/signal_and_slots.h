@@ -9,16 +9,17 @@
  *
  * 能力：
  *   - connection_type: Direct / Queued / BlockingQueued / Auto
- *   - 槽必须返回 slots_t / slots_t<T>（普通 void 函数不能 connect）
- *   - unique 连接：同一接收者 + 同一成员槽只连一次
+ *   - 成员槽必须返回 slots_t / slots_t<T>；也可 connect(receiver, lambda)（不要求 slots_t）
+ *   - unique 连接：同一接收者 + 同一成员槽只连一次（lambda 不做 unique）
  *   - object::block_signals：批量改状态时暂停该对象发出的信号（信号需 signal{this}）
  *   - signal::disconnect(receiver)：按接收者断开
  *   - connection / scoped_connection（可断开、RAII）
- *   - object 析构自动断开入站连接，槽内校验存活，避免悬空
+ *   - object 析构自动断开入站连接；Queued 槽执行前再查 is_valid()；invalidate 同亲和排空
  *   - object::delete_later + object_uptr / object_sptr / object_wptr
  *   - connect / emit 线程安全；connect 支持裸指针与智能指针（非拥有观察）
- *   - event_loop：post / 延迟定时器 / 周期定时器 / process_events
- *   - worker_thread：一线程一循环
+ *   - emit(Args...) 按值入参（decay-copy）；Queued 再打包进队列
+ *   - event_loop：post / 延迟定时器 / 周期定时器 / process_events（budget 内可候定时器）
+ *   - worker_thread：一线程一循环；禁止在工作线程内 stop（assert 硬失败）
  *   - core_application / ensure_thread_loop：每线程默认 event_loop（仿 QThread 亲和）
  *   - connect 语法糖；emit / connect 丢弃槽返回值
  *   - invoke(槽)：Direct / BlockingQueued 用 result<T> 取回 slots_t 中的值
@@ -28,16 +29,17 @@
  *
  * 使用注意：
  *   1) 跨线程 object 销毁前先 worker_thread::stop() / 排空队列
- *   2) 派生类若可能被跨线程回调，析构函数第一行调用 invalidate()
+ *   2) 派生类析构第一行必须 invalidate()（会断连；若当前在亲和线程则 process_events 排空）
  *       （堆对象优先 object_uptr / delete_later，可减少手动 invalidate）
  *   3) 跨线程 Direct 会自动降级为 Queued；Queued/BlockingQueued 无 loop 则丢弃
- *      BlockingQueued 要求目标 loop 正在 run（例如 worker_thread）；循环阻塞等待可能导致死锁
- *   4) 禁止在工作线程里调用 worker_thread::stop() 期望 join 自己
+ *      BlockingQueued 要求目标 loop 正在 run；对正在泵的本 loop post_blocking 会失败（防自死锁）
+ *   4) 禁止在工作线程里调用 worker_thread::stop()（硬失败，不销毁 loop）
  *   5) 主线程建议先构造 core_application（或依赖 object 内 ensure_thread_loop）
  *   6) 堆上 object 建议只用 object_uptr/object_sptr 拥有；connect 仅观察不延长寿命
  */
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -146,8 +148,9 @@ public:
     */
     bool post_blocking(task task_) {
         if (!task_) return false;
+        // 正在泵本 loop 时再阻塞等待自己 → 死锁；拒绝投递
+        if (tls_running_loop == this) return false;
         auto state = std::make_shared<blocking_post_state>();
-        //将阻塞任务添加到队列中，添加成功则返回true，否则返回false
         if (!post_impl([task_ = std::move(task_), state]() mutable {
                 try {
                     task_();
@@ -165,7 +168,6 @@ public:
             return false;
         }
         {
-            //阻塞任务会在任务执行结束的时候将条件变量设置为true，然后通知主线程
             std::unique_lock<std::mutex> lock(state->mutex);
             state->cv.wait(lock, [&] { return state->done; });
         }
@@ -263,9 +265,10 @@ public:
         return _running;
     }
 
-    /**  
+    /**
      * @brief 处理已到期的定时器与已排队任务；可选最长等待。会临时设置 tls。
-     * 
+     * @note 无 budget：只排空当前到期/已排队任务，不等待未来定时器（供 invalidate 排空）。
+     *       有 budget：空闲时可 wait 到下一定时器或 deadline。
      */
     void process_events(
         std::optional<clock::duration> budget = std::nullopt) {
@@ -281,9 +284,19 @@ public:
             {
                 std::unique_lock<std::mutex> lock(_mutex);
                 flush_due_timers_unlocked();
-                if (_tasks.empty()) break;
-                task_ = std::move(_tasks.front());
-                _tasks.pop();
+                if (!_tasks.empty()) {
+                    task_ = std::move(_tasks.front());
+                    _tasks.pop();
+                } else if (!deadline) {
+                    break;  // 无预算：不候未来 timer
+                } else if (!_timers.empty()) {
+                    const auto next = _timers.top()._when;
+                    if (next >= *deadline) break;
+                    _cv.wait_until(lock, next);
+                    continue;
+                } else {
+                    break;
+                }
             }
             if (task_) task_();
         }
@@ -434,13 +447,18 @@ public:
             loop_ = std::move(_loop);
             th = std::move(_thread);
         }
-        if (loop_) loop_->stop();
-        if (!th.joinable()) return;
-        if (th.get_id() == std::this_thread::get_id()) {
-            th.detach();
+        if (!loop_ && !th.joinable()) return;
+        // 禁止在工作线程内 stop：会 UAF（run 仍在用 loop）。放回并硬失败。
+        if (th.joinable() && th.get_id() == std::this_thread::get_id()) {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _loop = std::move(loop_);
+            _thread = std::move(th);
+            assert(false &&
+                   "worker_thread::stop() must not be called from its own thread");
             return;
         }
-        th.join();
+        if (loop_) loop_->stop();
+        if (th.joinable()) th.join();
     }
 
     event_loop* loop() const {
@@ -536,22 +554,26 @@ public:
 
     virtual ~object() { invalidate(); }
 
-    /// 提前失效。跨线程接收者：请在派生类析构函数第一行调用，
+    /// 提前失效。派生类析构函数第一行必须调用，
     /// 否则 ~object 才失效时，派生成员可能已销毁而 Queued 槽仍可能 lock 成功。
+    /// 同亲和线程时会 process_events() 排空已排队任务（槽内见 !is_valid 直接返回）。
     void invalidate() noexcept {
         bool expected = true;
-        //将valid从true改为false，如果是已经失效过的直接放回
         if (!_valid.compare_exchange_strong(expected, false)) return;
-        _alive.reset(); //丢弃这个指针
+        _alive.reset();
         std::vector<std::shared_ptr<connection_state>> inbound;
         {
             std::lock_guard<std::mutex> lock(_inbound_mutex);
-            inbound.swap(_inbound); //在锁内将本对象连接的所有连接移动到局部变量中
+            inbound.swap(_inbound);
         }
         for (auto& s : inbound) {
             if (!s) continue;
             if (!s->_alive.exchange(false, std::memory_order_acq_rel)) continue;
             if (s->_disconnect_fn) s->_disconnect_fn();
+        }
+        event_loop* loop_ = _loop.load(std::memory_order_acquire);
+        if (loop_ && current_thread_loop() == loop_) {
+            loop_->process_events();  // 无 budget：只排空到期/已排队，不候未来 timer
         }
     }
 
@@ -717,6 +739,29 @@ public:
         return connect_pmf(receiver, method, type, unique);
     }
 
+    /// 绑定到 object 的可调用对象（lambda 等）；执行前校验 lifetime / is_valid
+    template <typename recv, typename F,
+              std::enable_if_t<
+                  std::is_base_of_v<object, recv> &&
+                      std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                      !std::is_member_function_pointer_v<std::decay_t<F>>,
+                  int> = 0>
+    connection connect(recv* receiver, F&& func,
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        (void)unique;  // lambda 不做 unique 去重
+        if (!receiver) return {};
+        object* obj = static_cast<object*>(receiver);
+        return add_connection(
+            obj,
+            [obj, fn = std::decay_t<F>(std::forward<F>(func))](
+                const Args&... args) mutable {
+                if (!obj->is_valid()) return;
+                (void)fn(args...);
+            },
+            type, false, slot_key{});
+    }
+
     /// 智能指针语法糖（非拥有：不因连接持有 shared 延长寿命）
     template <typename recv, typename D, typename slot_class, typename R,
               typename... slot_args>
@@ -734,6 +779,16 @@ public:
                        bool unique = false) {
         return connect(receiver.get(), method, type, unique);
     }
+    template <typename recv, typename D, typename F,
+              std::enable_if_t<
+                  std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                      !std::is_member_function_pointer_v<std::decay_t<F>>,
+                  int> = 0>
+    connection connect(const std::unique_ptr<recv, D>& receiver, F&& func,
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect(receiver.get(), std::forward<F>(func), type, unique);
+    }
     template <typename recv, typename slot_class, typename R,
               typename... slot_args>
     connection connect(const std::shared_ptr<recv>& receiver,
@@ -749,6 +804,16 @@ public:
                        connection_type type = connection_type::automatic,
                        bool unique = false) {
         return connect(receiver.get(), method, type, unique);
+    }
+    template <typename recv, typename F,
+              std::enable_if_t<
+                  std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                      !std::is_member_function_pointer_v<std::decay_t<F>>,
+                  int> = 0>
+    connection connect(const std::shared_ptr<recv>& receiver, F&& func,
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        return connect(receiver.get(), std::forward<F>(func), type, unique);
     }
     template <typename recv, typename slot_class, typename R,
               typename... slot_args>
@@ -767,6 +832,17 @@ public:
                        bool unique = false) {
         auto locked = receiver.lock();
         return connect(locked.get(), method, type, unique);
+    }
+    template <typename recv, typename F,
+              std::enable_if_t<
+                  std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                      !std::is_member_function_pointer_v<std::decay_t<F>>,
+                  int> = 0>
+    connection connect(const std::weak_ptr<recv>& receiver, F&& func,
+                       connection_type type = connection_type::automatic,
+                       bool unique = false) {
+        auto locked = receiver.lock();
+        return connect(locked.get(), std::forward<F>(func), type, unique);
     }
 
     void disconnect(connection& c) { c.disconnect(); }
@@ -825,9 +901,10 @@ public:
         }
     }
 
-    void emit(const Args&... args) const {
+    /// 按值入参（调用处 decay-copy / move）；Queued 再按连接拷贝打包。
+    /// move-only 参数：多个 Queued 连接时仅第一次 move 有效，宜单连接或改用可拷贝包装。
+    void emit(Args... args) const {
         if (signals_blocked()) return;
-        // 复用 thread_local 容量，避免每次 emit 堆分配；swap 以支持同线程重入 emit
         thread_local std::vector<entry> tls_scratch;
         std::vector<entry> snapshot;
         snapshot.swap(tls_scratch);
@@ -837,10 +914,18 @@ public:
             snapshot.reserve(_entries.size());
             for (const auto& e : _entries) {
                 if (e._state && e._state->_alive.load(std::memory_order_acquire)) {
-                    snapshot.push_back(e); //如果连接状态不为空，则添加到snapshot中
+                    snapshot.push_back(e);
                 }
             }
         }
+
+        auto make_bound_args = [&] {
+            if constexpr ((std::is_copy_constructible_v<Args> && ...)) {
+                return std::make_tuple(args...);
+            } else {
+                return std::make_tuple(std::move(args)...);
+            }
+        };
 
         for (const auto& e : snapshot) {
             if (!e._state->_alive.load(std::memory_order_acquire)) continue;
@@ -849,6 +934,7 @@ public:
             if (e._receiver) {
                 auto gate = e._receiver_alive.lock();
                 if (!gate) continue;
+                if (!e._receiver->is_valid()) continue;
                 target_loop = e._receiver->thread();
             } else if (e._receiver_alive.expired()) {
                 continue;
@@ -856,7 +942,6 @@ public:
 
             const bool same_thread = (target_loop == current_thread_loop());
 
-            // Direct 跨线程 → 降级 Queued；BlockingQueued 仅在目标 loop 正在泵时等待
             bool use_direct = false;
             bool use_blocking = false;
             if (e._type == connection_type::queued) {
@@ -874,47 +959,54 @@ public:
                 if (same_thread || !target_loop) {
                     use_direct = true;
                 } else {
-                    use_direct = false;  // 跨线程 Direct 降级
+                    use_direct = false;
                 }
-            } else {  // Auto, 如果在同一个线程中，或者当前没有设置loop线程
+            } else {
                 use_direct = same_thread || !target_loop;
             }
 
             if (use_direct) {
-                if (e._receiver && e._receiver_alive.expired()) continue;
+                if (e._receiver &&
+                    (!e._receiver->is_valid() || e._receiver_alive.expired())) {
+                    continue;
+                }
                 e._slot(args...);
             } else if (use_blocking) {
                 if (!target_loop) continue;
                 auto bound_slot = e._slot;
-                auto bound_args = std::make_tuple(args...);
+                auto bound_args = make_bound_args();
                 auto weak = e._receiver_alive;
-                target_loop->post_blocking(
+                object* receiver = e._receiver;
+                (void)target_loop->post_blocking(
                     [bound_slot = std::move(bound_slot),
-                     bound_args = std::move(bound_args),
-                     weak = std::move(weak)]() mutable {
+                     bound_args = std::move(bound_args), weak,
+                     receiver]() mutable {
                         if (!weak.lock()) return;
+                        if (receiver && !receiver->is_valid()) return;
                         std::apply(bound_slot, std::move(bound_args));
                     });
             } else {
                 if (!target_loop) continue;
                 auto bound_slot = e._slot;
-                auto bound_args = std::make_tuple(args...);
+                auto bound_args = make_bound_args();
                 auto weak = e._receiver_alive;
+                object* receiver = e._receiver;
                 target_loop->post(
                     [bound_slot = std::move(bound_slot),
-                     bound_args = std::move(bound_args),
-                     weak = std::move(weak)]() mutable {
+                     bound_args = std::move(bound_args), weak,
+                     receiver]() mutable {
                         if (!weak.lock()) return;
+                        if (receiver && !receiver->is_valid()) return;
                         std::apply(bound_slot, std::move(bound_args));
                     });
             }
         }
 
         snapshot.clear();
-        tls_scratch.swap(snapshot);  // 归还容量供后续 emit 复用
+        tls_scratch.swap(snapshot);
     }
 
-    void operator()(const Args&... args) const { emit(args...); }
+    void operator()(Args... args) const { emit(std::move(args)...); }
 
 private:
     template <typename recv, typename Method>
@@ -926,7 +1018,8 @@ private:
         object* obj = static_cast<object*>(receiver);
         return add_connection(
             obj,
-            [receiver, method](const Args&... args) {
+            [obj, receiver, method](const Args&... args) {
+                if (!obj->is_valid()) return;
                 (void)(receiver->*method)(args...);
             },
             type, unique, make_pmf_key(obj, method));
@@ -1083,7 +1176,9 @@ result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
     }
 
     auto call = [&]() -> result<R> {
-        if (!obj->lifetime().lock()) return result_err(std::errc::owner_dead);
+        if (!obj->is_valid() || !obj->lifetime().lock()) {
+            return result_err(std::errc::owner_dead);
+        }
         if constexpr (std::is_void_v<R>) {
             (receiver->*method)(std::forward<Args>(args)...);
             return result_ok();
@@ -1101,9 +1196,9 @@ result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
     std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
     auto weak = obj->lifetime();
     const bool posted = loop_->post_blocking(
-        [receiver, method, bound_args = std::move(bound_args), weak,
+        [receiver, method, bound_args = std::move(bound_args), weak, obj,
          out]() mutable {
-            if (!weak.lock()) {
+            if (!weak.lock() || !obj->is_valid()) {
                 *out = result<R>(result_err(std::errc::owner_dead));
                 return;
             }
@@ -1124,7 +1219,7 @@ result<typename slot_pmf_traits<Method>::value_type> invoke_slot(
                     std::move(bound_args)));
             }
         });
-    if (!posted) return result_err(std::errc::operation_canceled);
+    if (!posted) return result_err(std::errc::operation_not_permitted);
     return std::move(*out);
 }
 
@@ -1209,19 +1304,20 @@ inline void invoke(object* receiver, std::function<void()> fn,
     }
 
     if (use_direct) {
-        if (!receiver->lifetime().lock()) return;
+        if (!receiver->is_valid() || !receiver->lifetime().lock()) return;
         fn();
         return;
     }
     if (!loop_) return;
 
     auto weak = receiver->lifetime();
-    auto wrapped = [weak = std::move(weak), fn = std::move(fn)]() mutable {
-        if (!weak.lock()) return;
+    auto wrapped = [weak = std::move(weak), fn = std::move(fn),
+                    receiver]() mutable {
+        if (!weak.lock() || !receiver->is_valid()) return;
         fn();
     };
     if (use_blocking) {
-        loop_->post_blocking(std::move(wrapped));
+        (void)loop_->post_blocking(std::move(wrapped));
     } else {
         loop_->post(std::move(wrapped));
     }
@@ -1316,6 +1412,41 @@ connection connect(signal<Args...>& signal_, const std::weak_ptr<recv>& receiver
                    connection_type type = connection_type::automatic,
                    bool unique = false) {
     return signal_.connect(receiver, method, type, unique);
+}
+
+template <typename... Args, typename recv, typename F,
+          std::enable_if_t<
+              std::is_base_of_v<object, recv> &&
+                  std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                  !std::is_member_function_pointer_v<std::decay_t<F>>,
+              int> = 0>
+connection connect(signal<Args...>& signal_, recv* receiver, F&& func,
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::forward<F>(func), type, unique);
+}
+
+template <typename... Args, typename recv, typename D, typename F,
+          std::enable_if_t<
+              std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                  !std::is_member_function_pointer_v<std::decay_t<F>>,
+              int> = 0>
+connection connect(signal<Args...>& signal_,
+                   const std::unique_ptr<recv, D>& receiver, F&& func,
+                   connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::forward<F>(func), type, unique);
+}
+
+template <typename... Args, typename recv, typename F,
+          std::enable_if_t<
+              std::is_invocable_v<std::decay_t<F>&, const Args&...> &&
+                  !std::is_member_function_pointer_v<std::decay_t<F>>,
+              int> = 0>
+connection connect(signal<Args...>& signal_, const std::shared_ptr<recv>& receiver,
+                   F&& func, connection_type type = connection_type::automatic,
+                   bool unique = false) {
+    return signal_.connect(receiver, std::forward<F>(func), type, unique);
 }
 
 }  // namespace utils
