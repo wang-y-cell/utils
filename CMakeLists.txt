@@ -32,9 +32,9 @@ function(utils_add_exe name)
 endfunction()
 
 # ---- tests (vendored GoogleTest, no network fetch) ----
-set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE) # 不安装 GoogleTest
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE) # 不构建 GoogleMock
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE) # 强制使用共享 CRT
 add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
 
 enable_testing()

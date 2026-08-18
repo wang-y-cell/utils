@@ -169,6 +169,7 @@ slots_t<int>       // 带一个 int，供 invoke 取出
 | `T& get() &` | 取回内部值 |
 | `const T& get() const&` | |
 | `T get() &&` | 移动取出 |
+| `operator T() const noexcept` | 隐式类型转换 |
 
 ### 4.3 示例
 
@@ -549,6 +550,21 @@ auto v = invoke(&win, connection_type::blocking_queued, &Window::nameLen);
 
 ## 10. event_loop
 
+> **⚠️ 不推荐直接使用 `event_loop`**
+>
+> 直接使用时需要手动设置线程亲和（`tls_default_loop`）、保证生命周期顺序、自行管理 `run()` / `stop()`。
+> 遗漏任意一步都可能导致悬空指针或 UAF。
+>
+> **请优先使用以下三种封装方式：**
+>
+> | 场景 | 推荐方式 |
+> |------|----------|
+> | 应用程序主线程事件循环 | [`core_application`](#11-core_application) |
+> | 继承 `object` 在当前线程接收槽 | 继承 `object`，直接 `connect`（自动亲和到构造线程） |
+> | 后台独立事件循环线程 | [`worker_thread`](#12-worker_thread) |
+>
+> `event_loop` 本身保留给框架内部、测试以及极少数需要手写事件泵的特殊场景。
+
 每线程事件循环：任务队列 + 定时器。
 
 ### 10.1 类型别名
@@ -600,9 +616,14 @@ loop->cancel_timer(id);
 
 工作线程上通常由 `worker_thread` 调用 `run()`，不必手写。
 
+> **`process_events()` 的适用场景**：测试、同步等待一批任务完成、或在没有完整事件循环的情况下手动排空队列。不适合长期运行的工作线程。
+
 ---
 
 ## 11. core_application
+
+> **主线程应用程序的标准起点。**
+> 构造后主线程所有 `object` 自动亲和到同一 loop，无需任何额外配置。
 
 仿 `QCoreApplication`：在主线程注册默认 `event_loop`。
 
@@ -629,6 +650,9 @@ int main() {
 ---
 
 ## 12. worker_thread
+
+> **后台线程的标准方式。**
+> 自动完成：创建 `event_loop`、设置工作线程亲和、在新线程 `run()`、停止时 `join()`。
 
 一线程托管一个 `event_loop`（仿简易 `QThread`）。
 
@@ -693,13 +717,14 @@ connect(btn.clicked, win, &Window::onClicked);
 
 ## 14. 线程与生命周期注意事项
 
-1. **跨线程销毁**：先停相关 `worker_thread` / 排空队列，或依赖 `delete_later`。
-2. **派生析构第一行 `invalidate()`**。
-3. **BlockingQueued**：目标须 `run`；勿在正在泵的同一 loop 上对自己 `post_blocking` / `blocking_queued`。
-4. **禁止在工作线程内 `worker_thread::stop()`**。
-5. 主线程建议先构造 `core_application`。
-6. 堆对象优先 `object_uptr` / `object_sptr`；`connect` 不延长寿命。
-7. 跨线程 Direct 连接会降级为 Queued；无 loop 的 Queued/Blocking 会丢弃或失败。
+1. **不要直接使用 `event_loop`**：请用 `core_application`（主线程）、继承 `object`（同线程槽）或 `worker_thread`（后台线程）代替。直接使用需手动管理亲和、生命周期和 `run`/`stop`，遗漏易造成悬空指针或 UAF。
+2. **跨线程销毁**：先停相关 `worker_thread` / 排空队列，或依赖 `delete_later`。
+3. **派生析构第一行 `invalidate()`**。
+4. **BlockingQueued**：目标须 `run`；勿在正在泵的同一 loop 上对自己 `post_blocking` / `blocking_queued`。
+5. **禁止在工作线程内 `worker_thread::stop()`**。
+6. 主线程建议先构造 `core_application`。
+7. 堆对象优先 `object_uptr` / `object_sptr`；`connect` 不延长寿命。
+8. 跨线程 Direct 连接会降级为 Queued；无 loop 的 Queued/Blocking 会丢弃或失败。
 
 ---
 
