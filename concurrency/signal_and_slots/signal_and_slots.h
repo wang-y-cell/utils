@@ -44,6 +44,9 @@
  * worker_thread::stop()（硬失败，不销毁 loop） 5) 主线程建议先构造
  * core_application（或依赖 object 内 ensure_thread_loop） 6) 堆上 object
  * 建议只用 object_uptr/object_sptr 拥有；connect 仅观察不延长寿命
+ *   7) 跨线程亲和请 move_to_thread(worker_thread&)（动态解析 loop）；stop 后
+ * emit 安全跳过，再 start 后自动绑到新 loop。勿长期持有
+ * move_to_thread(worker.loop()) 的裸 loop*（stop 后会悬空）
  */
 #include <algorithm>
 #include <atomic>
@@ -483,6 +486,9 @@ public:
 
   ~worker_thread() { stop(); }
 
+  /**
+   * @brief 启动这个线程
+   */
   void start() {
     std::lock_guard<std::mutex> lock(_mutex);
     if (_thread.joinable())
@@ -501,9 +507,10 @@ public:
     std::thread th;
     {
       std::lock_guard<std::mutex> lock(_mutex);
-      loop_ = std::move(_loop);
-      th = std::move(_thread);
+      loop_ = std::move(_loop); //获得这块局部变量,等到生命周期结束自动释放内存
+      th = std::move(_thread); //获得这块局部变量,等到生命周期结束自动释放内存
     }
+    //如果loop为空且线程不活跃,则直接返回
     if (!loop_ && !th.joinable())
       return;
     // 禁止在工作线程内 stop：会 UAF（run 仍在用 loop）。放回并硬失败。
@@ -518,11 +525,12 @@ public:
     // 停止loop之后等待执行loop线程结束，确保loop线程已经停止
     if (loop_)
       loop_->stop();
+    //等待loop执行完成,线程退出
     if (th.joinable())
       th.join();
   }
 
-  /// 当前线程绑定的默认线程loop对象，在构造函数里获得
+  /// 当前托管的 event_loop；未 start / 已 stop 时为 nullptr
   event_loop *loop() const {
     std::lock_guard<std::mutex> lock(_mutex);
     return _loop.get();
@@ -533,14 +541,19 @@ public:
     return _thread.joinable() && _loop && _loop->is_running();
   }
 
+  /// object 亲和观察令牌：worker 析构后 weak 失效，避免解引用悬空 this
+  std::weak_ptr<void> identity() const noexcept { return _identity; }
+
 private:
   mutable std::mutex _mutex;
   std::unique_ptr<event_loop> _loop;
   std::thread _thread;
+  std::shared_ptr<void> _identity{std::make_shared<char>('\0')};
 };
 
 // =============================================================================
 // 连接状态（signal 与 connection 共享）
+// 用来保存这个连接是否存活,id,断开连接的函数
 // =============================================================================
 struct connection_state {
   std::atomic<bool> _alive{true};
@@ -614,7 +627,7 @@ public:
     // 如果main函数没有创建core_application对象，你创建一个继承object的类时
     // 只要这个对象在main线程中创建，_loop指向的就是main线程的loop
     // 如果此对象在其他线程中创建，_loop指向的就是其他线程的loop
-    _loop.store(ensure_thread_loop(), std::memory_order_release);
+    _loop = ensure_thread_loop();
   }
 
   object(const object &) = delete;
@@ -644,24 +657,40 @@ public:
       if (s->_disconnect_fn)
         s->_disconnect_fn();
     }
-    event_loop *loop_ = _loop.load(std::memory_order_acquire);
+    event_loop *loop_ = thread();
     if (loop_ && current_thread_loop() == loop_) {
       loop_->process_events(); // 无 budget：只排空到期/已排队，不候未来 timer
     }
   }
 
-  /// 将当前对象的亲和线程切换成loop_，意思是当前对象的所有信号和槽都将在新的loop_中执行
+  /// 绑定到裸 event_loop*。调用方须保证 loop 存活；若 loop 来自
+  /// worker_thread，stop 后指针会悬空——跨线程场景请用
+  /// move_to_thread(worker_thread&)。
   void move_to_thread(event_loop *loop_) noexcept {
-    _loop.store(loop_, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(_affinity_mutex);
+    _worker = nullptr;
+    _worker_alive.reset();
+    _loop = loop_;
   }
+  /// 绑定到 worker：thread() 每次动态取 loop()。stop 后为 nullptr（emit
+  /// 安全跳过）；再 start 后自动指向新 loop，无需重新 move。
   void move_to_thread(worker_thread *thread_) noexcept {
-    move_to_thread(thread_ ? thread_->loop() : nullptr);
+    std::lock_guard<std::mutex> lock(_affinity_mutex);
+    _worker = thread_;
+    _worker_alive = thread_ ? thread_->identity() : std::weak_ptr<void>{};
+    _loop = nullptr;
   }
   void move_to_thread(worker_thread &thread_) noexcept {
     move_to_thread(&thread_);
   }
   event_loop *thread() const noexcept {
-    return _loop.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(_affinity_mutex);
+    if (_worker) {
+      if (!_worker_alive.lock())
+        return nullptr;
+      return _worker->loop();
+    }
+    return _loop;
   }
 
   /// 预约删除（仅用于 new 出来的对象）。
@@ -681,7 +710,9 @@ public:
     delete this;
   }
 
+  /** @brief 获取对象的生存期,用于判断对象是否存活 */
   std::weak_ptr<void> lifetime() const { return _alive; }
+  /** @brief 判断对象是否有效 */
   bool is_valid() const noexcept {
     return _valid.load(std::memory_order_acquire);
   }
@@ -690,6 +721,7 @@ public:
   void block_signals(bool block) noexcept {
     _signals_blocked.store(block, std::memory_order_release);
   }
+  /// @brief 判断信号是否被阻塞
   [[nodiscard]] bool signals_blocked() const noexcept {
     return _signals_blocked.load(std::memory_order_acquire);
   }
@@ -712,8 +744,11 @@ public:
   }
 
 private:
-  /// 当前对象绑定的线程loop对象，是此对象所处线程的亲和loop
-  std::atomic<event_loop *> _loop{nullptr};
+  /// 亲和：要么绑 worker（动态 loop），要么绑裸 _loop
+  mutable std::mutex _affinity_mutex;
+  worker_thread *_worker = nullptr;
+  std::weak_ptr<void> _worker_alive;
+  event_loop *_loop = nullptr;
   std::shared_ptr<void> _alive;
   std::atomic<bool> _valid{true};
   std::atomic<bool> _signals_blocked{false};
@@ -767,7 +802,7 @@ template <typename T> T *object_get(const std::shared_ptr<T> &p) noexcept {
 // =============================================================================
 template <typename... Args> class signal {
 public:
-  using slot = std::function<void(Args...)>;
+  using slot = std::function<void(Args...)>; // 槽函数类型
 
   explicit signal(object *owner) noexcept
       : _owner(owner),
@@ -780,6 +815,11 @@ public:
   void block_signals(bool block) noexcept {
     _blocked.store(block, std::memory_order_release);
   }
+  
+  /**
+   * @brief 判断信号是否被阻塞
+   * @return 如果信号被阻塞，则返回 true，否则返回 false
+  */
   [[nodiscard]] bool signals_blocked() const noexcept {
     if (_blocked.load(std::memory_order_acquire))
       return true;
@@ -984,22 +1024,25 @@ public:
   /// move-only 参数：多个 Queued 连接时仅第一次 move
   /// 有效，宜单连接或改用可拷贝包装。
   void emit(Args... args) const {
-    if (signals_blocked())
+    if (signals_blocked()) //如果当前信号是阻塞状态,也就是说这个信号是blocking类型且被阻塞了,则直接返回,不进行emit
       return;
+    //thread_local的生命周期是伴随整个线程的,这是一个长期存活的对象
     thread_local std::vector<entry> tls_scratch;
     std::vector<entry> snapshot;
-    snapshot.swap(tls_scratch);
+    snapshot.swap(tls_scratch); //snapshot获得tls_scratch的值,并清空tls_scratch
     snapshot.clear();
     {
       std::lock_guard<std::mutex> lock(_mutex);
-      snapshot.reserve(_entries.size());
+      snapshot.reserve(_entries.size()); //将这个临时vector的容量设置为_entries的大小
       for (const auto &e : _entries) {
+        //如果连接状态不为空且连接状态存活,则将这个连接添加到snapshot中
         if (e._state && e._state->_alive.load(std::memory_order_acquire)) {
           snapshot.push_back(e);
         }
       }
     }
 
+    //将参数打包成一个tuple
     auto make_bound_args = [&] {
       if constexpr ((std::is_copy_constructible_v<Args> && ...)) {
         return std::make_tuple(args...);
@@ -1008,28 +1051,31 @@ public:
       }
     };
 
+    //遍历snapshot中的每个连接,这是遍历每个槽函数连接
     for (const auto &e : snapshot) {
+      //如果连接状态不存活,则直接跳过
       if (!e._state->_alive.load(std::memory_order_acquire))
         continue;
 
       event_loop *target_loop = nullptr;
-      if (e._receiver) {
-        auto gate = e._receiver_alive.lock();
-        if (!gate)
+      if (e._receiver) { //如果接收者不为空,则获取接收者的生存期
+        auto gate = e._receiver_alive.lock(); //获取接收者的生存期
+        if (!gate) //如果接收者的生存期为空,则直接跳过
           continue;
-        if (!e._receiver->is_valid())
+        if (!e._receiver->is_valid()) //如果接收者不有效,则直接跳过
           continue;
-        target_loop = e._receiver->thread();
-      } else if (e._receiver_alive.expired()) {
+        target_loop = e._receiver->thread(); //获取接收者的亲和loop
+      } else if (e._receiver_alive.expired()) { //如果接收者的生存期为空,则直接跳过
         continue;
       }
 
+      //判断当前线程是否与接收者在同一个线程
       const bool same_thread = (target_loop == current_thread_loop());
 
-      bool use_direct = false;
-      bool use_blocking = false;
+      bool use_direct = false; //是否使用直接调用
+      bool use_blocking = false; //是否使用阻塞调用
       if (e._type == connection_type::queued) {
-        if (!target_loop)
+        if (!target_loop) //如果亲和loop为空,则直接跳过
           continue;
         use_direct = false;
       } else if (e._type == connection_type::blocking_queued) {
@@ -1132,8 +1178,9 @@ private:
     }
   };
 
+  /// 整条连接的各种信息,包括连接状态,信号和槽函数对象,连接类型,槽函数键
   struct entry {
-    std::shared_ptr<connection_state> _state;
+    std::shared_ptr<connection_state> _state; // 连接状态
     object *_receiver = nullptr;         // 接收信号的object对象
     std::weak_ptr<void> _receiver_alive; // 接收信号的object对象是否存活
     slot _slot;
@@ -1203,9 +1250,9 @@ private:
   mutable std::mutex _mutex;
   std::vector<entry> _entries; // 这个信号有多少槽函数连接
   std::uint64_t _next_id = 1;
-  object *_owner = nullptr;
-  std::weak_ptr<void> _owner_alive;
-  std::atomic<bool> _blocked{false};
+  object *_owner = nullptr; // 信号的拥有者
+  std::weak_ptr<void> _owner_alive; // 信号的拥有者是否存活
+  std::atomic<bool> _blocked{false}; // 信号是否被阻塞
   // 无 receiver 连接的存活哨兵
   std::shared_ptr<void> _forever = std::make_shared<char>('\0');
 };

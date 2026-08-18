@@ -207,3 +207,30 @@ TEST(SignalAndSlots, BlockingQueuedWaitsForWorker) {
   EXPECT_EQ(r->last.load(), 7);
   worker.stop();
 }
+
+TEST(SignalAndSlots, WorkerAffinitySurvivesStopAndRestart) {
+  utils::worker_thread worker;
+  worker.start();
+  ASSERT_TRUE(wait_until([&] { return worker.is_running(); }));
+
+  sender s;
+  auto r = std::make_unique<receiver>();
+  r->move_to_thread(worker);
+  s.value_changed.connect(r.get(), &receiver::on_value,
+                          utils::connection_type::queued);
+
+  s.value_changed.emit(1);
+  ASSERT_TRUE(wait_until([&] { return r->last.load() == 1; }));
+
+  worker.stop();
+  EXPECT_EQ(r->thread(), nullptr);
+  s.value_changed.emit(2); // stop 后无 loop：应安全跳过，不 UAF
+  EXPECT_EQ(r->last.load(), 1);
+
+  worker.start();
+  ASSERT_TRUE(wait_until([&] { return worker.is_running(); }));
+  ASSERT_NE(r->thread(), nullptr);
+  s.value_changed.emit(3); // 再 start 后动态绑到新 loop，无需重新 move
+  ASSERT_TRUE(wait_until([&] { return r->last.load() == 3; }));
+  worker.stop();
+}

@@ -105,11 +105,13 @@ int main() {
 
 ### 2.2 线程亲和（Thread Affinity）
 
-每个 `object` 绑定一个 `event_loop*`（仿 `QObject`）：
+每个 `object` 绑定一个亲和目标（仿 `QObject`）：
 
 - 构造时绑定**当前线程**的默认 loop（`ensure_thread_loop()`）。
-- 可用 `move_to_thread` 换到工作线程。
-- `Queued` / `Auto`（跨线程）会把槽投递到接收者所属 loop。
+- 跨线程请用 `move_to_thread(worker)`（记住 `worker_thread*`，`thread()` **动态**取 `loop()`）。
+- `Queued` / `Auto`（跨线程）会把槽投递到接收者当前所属 loop；无 loop 则丢弃。
+
+**Tip：** `worker.stop()` 后 `thread()` 为 `nullptr`，再 `emit` 安全跳过；`worker.start()` 后无需重新 `move`，自动绑到新 loop。不要长期使用 `move_to_thread(worker.loop())`（裸 `event_loop*` 在 stop 后会悬空）。
 
 ### 2.3 连接不延长寿命
 
@@ -243,18 +245,23 @@ public:
 
 | API | 说明 |
 |-----|------|
-| `void move_to_thread(event_loop*)` | 切换亲和 loop |
-| `void move_to_thread(worker_thread*)` | |
-| `void move_to_thread(worker_thread&)` | |
-| `event_loop* thread() const` | 当前亲和 loop |
+| `void move_to_thread(event_loop*)` | 绑定裸 loop*（调用方保证存活；来自 worker 时 stop 后会悬空） |
+| `void move_to_thread(worker_thread*)` | **推荐**：动态解析 `loop()` |
+| `void move_to_thread(worker_thread&)` | 同上 |
+| `event_loop* thread() const` | 当前亲和 loop；绑 worker 且已 stop / worker 已毁时为 `nullptr` |
 
 ```cpp
 worker_thread worker;
 worker.start();
 
 Window win;
-win.move_to_thread(worker.loop());
+win.move_to_thread(worker);   // 推荐：不要写 worker.loop()
 // 之后 Queued 槽在 worker 线程执行
+
+worker.stop();
+sig.emit(...);                // 无 loop → 安全跳过
+worker.start();
+sig.emit(...);                // 自动进新 loop，无需再 move
 ```
 
 ### 5.4 删除与阻塞信号
@@ -527,7 +534,7 @@ invoke(&win, [&] {
 ```cpp
 worker_thread worker;
 worker.start();
-win.move_to_thread(worker.loop());
+win.move_to_thread(worker);
 
 auto v = invoke(&win, connection_type::blocking_queued, &Window::nameLen);
 ```
@@ -660,22 +667,27 @@ int main() {
 |-----|------|
 | `void start()` | 创建 loop 并在新线程 `run()` |
 | `void stop()` | `stop` loop 并 `join`。**禁止在工作线程内调用**（assert 硬失败） |
-| `event_loop* loop() const` | |
+| `event_loop* loop() const` | 未 start / 已 stop 时为 `nullptr` |
 | `bool is_running() const` | |
+| `std::weak_ptr<void> identity() const` | 供 object 观察 worker 是否仍存活 |
 
 ```cpp
 worker_thread worker;
 worker.start();
 
 Window win;
-win.move_to_thread(worker.loop());
+win.move_to_thread(worker);   // 推荐；勿长期持有 worker.loop()
 
 connect(btn.clicked, &win, &Window::onClicked);  // Auto → 跨线程 Queued
 btn.clicked.emit();
 
-std::this_thread::sleep_for(50ms);
-worker.stop();   // 务必在外线程 stop
+worker.stop();    // 务必在外线程 stop；此后 emit 安全跳过
+worker.start();   // 再 start 后，已 move 过的 object 自动用新 loop
+btn.clicked.emit();
+worker.stop();
 ```
+
+**Tip：** 亲和绑的是 `worker_thread`，不是某次 `start` 创建的那个 `event_loop*`。因此 stop / start 循环不会留下悬空亲和。
 
 ---
 
@@ -725,6 +737,7 @@ connect(btn.clicked, win, &Window::onClicked);
 6. 主线程建议先构造 `core_application`。
 7. 堆对象优先 `object_uptr` / `object_sptr`；`connect` 不延长寿命。
 8. 跨线程 Direct 连接会降级为 Queued；无 loop 的 Queued/Blocking 会丢弃或失败。
+9. **跨线程亲和用 `move_to_thread(worker)`**：`stop` 后 emit 安全跳过，再 `start` 自动绑新 loop。避免 `move_to_thread(worker.loop())` 长期持有裸指针。
 
 ---
 
