@@ -1,12 +1,12 @@
 build/
+build-*/
 main.cpp
 libpath/
-cmake/
 .vscode/
 .cache/
 
 *.exe
 *.dll
-*.lib 
-*.o 
+*.lib
+*.o
 *.obj
