@@ -28,11 +28,12 @@ cmake --build build --target demo_signal
 8. [connect（自由函数）](#8-connect自由函数)
 9. [invoke](#9-invoke)
 10. [event_loop](#10-event_loop)
-11. [core_application](#11-core_application)
-12. [worker_thread](#12-worker_thread)
-13. [智能指针与 delete_later](#13-智能指针与-delete_later)
-14. [线程与生命周期注意事项](#14-线程与生命周期注意事项)
-15. [与 Qt 对照](#15-与-qt-对照)
+11. [thread / ensure_thread](#11-thread--ensure_thread)
+12. [core_application](#12-core_application)
+13. [worker_thread](#13-worker_thread)
+14. [智能指针与 delete_later](#14-智能指针与-delete_later)
+15. [线程与生命周期注意事项](#15-线程与生命周期注意事项)
+16. [与 Qt 对照](#16-与-qt-对照)
 
 ---
 
@@ -105,13 +106,15 @@ int main() {
 
 ### 2.2 线程亲和（Thread Affinity）
 
-每个 `object` 绑定一个亲和目标（仿 `QObject`）：
+每个 `object` 绑定一个 `utils::thread*`（仿 `QObject`）：
 
-- 构造时绑定**当前线程**的默认 loop（`ensure_thread_loop()`）。
-- 跨线程请用 `move_to_thread(worker)`（记住 `worker_thread*`，`thread()` **动态**取 `loop()`）。
-- `Queued` / `Auto`（跨线程）会把槽投递到接收者当前所属 loop；无 loop 则丢弃。
+- 构造时绑到 `ensure_thread()`（当前 OS 线程句柄，TLS，不新开线程）。
+- 跨线程用 `move_to_thread(worker)`（`worker_thread` 继承 `thread`）。
+- `move_to_thread(nullptr)` 回到 `ensure_thread()`（调用方当前线程）。
+- `object::thread()` 返回亲和句柄；`object::loop()` 解析投递用的 `event_loop*`。
+- `Queued` / 跨线程 `Auto` 投递到 `loop()`；无 loop 则丢弃。
 
-**Tip：** `worker.stop()` 后 `thread()` 为 `nullptr`，再 `emit` 安全跳过；`worker.start()` 后无需重新 `move`，自动绑到新 loop。不要长期使用 `move_to_thread(worker.loop())`（裸 `event_loop*` 在 stop 后会悬空）。
+**Tip：** 绑 worker 后 `stop()` → `loop()` 为 `nullptr`，Queued emit 安全跳过；再 `start()` 无需重新 `move`。
 
 ### 2.3 连接不延长寿命
 
@@ -215,7 +218,7 @@ object(const object&) = delete;
 virtual ~object();   // 内部调用 invalidate()
 ```
 
-构造时自动：`_loop = ensure_thread_loop()`。
+构造时自动：`_affinity = ensure_thread()`。
 
 ### 5.2 生命周期
 
@@ -245,23 +248,27 @@ public:
 
 | API | 说明 |
 |-----|------|
-| `void move_to_thread(event_loop*)` | 绑定裸 loop*（调用方保证存活；来自 worker 时 stop 后会悬空） |
-| `void move_to_thread(worker_thread*)` | **推荐**：动态解析 `loop()` |
-| `void move_to_thread(worker_thread&)` | 同上 |
-| `event_loop* thread() const` | 当前亲和 loop；绑 worker 且已 stop / worker 已毁时为 `nullptr` |
+| `void move_to_thread(thread*)` | 绑定线程句柄；`nullptr` → `ensure_thread()` |
+| `void move_to_thread(thread&)` | 同上（含 `worker_thread&`） |
+| `thread* thread() const` | 亲和句柄（仿 `QObject::thread`）；句柄已毁为 `nullptr` |
+| `event_loop* loop() const` | 投递目标；worker 已 stop 时可能为 `nullptr` |
+| `worker_thread* worker() const` | `dynamic_cast`；非 worker 亲和时为 `nullptr` |
 
 ```cpp
 worker_thread worker;
 worker.start();
 
 Window win;
-win.move_to_thread(worker);   // 推荐：不要写 worker.loop()
+EXPECT(win.thread() == ensure_thread());
+win.move_to_thread(worker);
 // 之后 Queued 槽在 worker 线程执行
 
 worker.stop();
-sig.emit(...);                // 无 loop → 安全跳过
+sig.emit(...);                // loop()==nullptr → Queued 安全跳过
 worker.start();
 sig.emit(...);                // 自动进新 loop，无需再 move
+
+win.move_to_thread(nullptr);  // 回到 ensure_thread()
 ```
 
 ### 5.4 删除与阻塞信号
@@ -559,18 +566,18 @@ auto v = invoke(&win, connection_type::blocking_queued, &Window::nameLen);
 
 > **⚠️ 不推荐直接使用 `event_loop`**
 >
-> 直接使用时需要手动设置线程亲和（`tls_default_loop`）、保证生命周期顺序、自行管理 `run()` / `stop()`。
-> 遗漏任意一步都可能导致悬空指针或 UAF。
+> 直接使用时需要自行管理 `run()` / `stop()` 与生命周期。
+> **`object` 不能 `move_to_thread(event_loop*)`**；跨线程请用 `worker_thread`。
 >
 > **请优先使用以下三种封装方式：**
 >
 > | 场景 | 推荐方式 |
 > |------|----------|
-> | 应用程序主线程事件循环 | [`core_application`](#11-core_application) |
-> | 继承 `object` 在当前线程接收槽 | 继承 `object`，直接 `connect`（自动亲和到构造线程） |
-> | 后台独立事件循环线程 | [`worker_thread`](#12-worker_thread) |
+> | 应用程序主线程事件循环 | [`core_application`](#12-core_application) / [`ensure_thread`](#11-thread--ensure_thread) |
+> | 继承 `object` 在当前线程接收槽 | 继承 `object`，直接 `connect`（自动亲和到 `ensure_thread()`） |
+> | 后台独立事件循环线程 | [`worker_thread`](#13-worker_thread) + `move_to_thread(worker)` |
 >
-> `event_loop` 本身保留给框架内部、测试以及极少数需要手写事件泵的特殊场景。
+> `event_loop` 本身保留给框架内部、测试、定时器/`post`，以及 `event_loop_executor` 等适配器。
 
 每线程事件循环：任务队列 + 定时器。
 
@@ -600,15 +607,17 @@ using timer_id = std::uint64_t;
 
 ```cpp
 event_loop* current_thread_loop() noexcept;  // 优先 running，否则 default
-event_loop* ensure_thread_loop();            // 保证本线程有默认 loop
+event_loop* ensure_thread_loop();            // 等价 ensure_thread()->loop()
 ```
+
+通常应通过 [`ensure_thread()`](#11-thread--ensure_thread) / `object::loop()` 获取 loop，不必直接调用 `ensure_thread_loop`。
 
 ### 10.4 示例
 
 ```cpp
 using namespace std::chrono_literals;
 
-event_loop* loop = ensure_thread_loop();
+event_loop* loop = ensure_thread()->loop();  // 或 ensure_thread_loop()
 
 loop->post([] { std::cout << "task\n"; });
 
@@ -627,18 +636,44 @@ loop->cancel_timer(id);
 
 ---
 
-## 11. core_application
+## 11. thread / ensure_thread
+
+> **线程亲和句柄**（仿 `QThread` / `QThread::currentThread()`）。  
+> `object` 只持有 `thread*`；`event_loop` 仅作投递实现。
+
+| 类型 / API | 说明 |
+|------------|------|
+| `thread` | 抽象基类：`loop()` / `is_running()` / `identity()` |
+| `current_thread` | 当前 OS 线程句柄（不 spawn），**拥有**本线程默认 `event_loop` |
+| `thread* ensure_thread()` | 当前线程句柄；worker 线程内指向该 `worker_thread` |
+| `event_loop* ensure_thread_loop()` | 薄包装：`ensure_thread()->loop()`（兼容旧代码） |
+
+```cpp
+thread* t = ensure_thread();          // 主线程：TLS current_thread
+event_loop* loop = t->loop();         // current_thread 拥有的默认 loop
+
+worker_thread worker;
+worker.start();
+// worker 线程内 ensure_thread() == &worker
+```
+
+注意与 `std::thread` 区分：本类型在命名空间 `utils` 中。
+
+---
+
+## 12. core_application
 
 > **主线程应用程序的标准起点。**
-> 构造后主线程所有 `object` 自动亲和到同一 loop，无需任何额外配置。
+> 构造后主线程所有 `object` 自动亲和到 `ensure_thread()`。
 
-仿 `QCoreApplication`：在主线程注册默认 `event_loop`。
+仿 `QCoreApplication`：注册当前线程句柄与默认 `event_loop`。
 
 ```cpp
 class core_application {
 public:
-    core_application();           // ensure_thread_loop()
-    event_loop* thread() const;
+    core_application();           // ensure_thread()
+    thread* thread() const;
+    event_loop* loop() const;
     int exec();                   // loop->run()，返回 0
 };
 ```
@@ -646,22 +681,20 @@ public:
 ```cpp
 int main() {
     core_application app;
-    // 此后本线程创建的 object 默认亲和到 app 的 loop
+    // 此后本线程创建的 object 默认亲和到 app.thread()
     // app.exec();  // 若需要主线程持续泵事件
     return 0;
 }
 ```
 
-即使不 `exec()`，只要构造过 `core_application`（或任意 `object` 触发了 `ensure_thread_loop`），主线程也有默认亲和 loop，可供 Direct / 同线程逻辑使用。跨线程 Queued 仍需要目标侧有人 `run`/`process_events`。
+即使不 `exec()`，只要构造过 `core_application`（或任意 `object` 触发了 `ensure_thread`），主线程也有默认亲和，可供 Direct / 同线程逻辑使用。跨线程 Queued 仍需要目标侧有人 `run`/`process_events`。
 
 ---
 
-## 12. worker_thread
+## 13. worker_thread
 
-> **后台线程的标准方式。**
-> 自动完成：创建 `event_loop`、设置工作线程亲和、在新线程 `run()`、停止时 `join()`。
-
-一线程托管一个 `event_loop`（仿简易 `QThread`）。
+> **后台线程的标准方式。**  
+> 继承 `thread`：创建 `event_loop`、在新线程 `run()`、将该 worker 注册为该 OS 线程的 `ensure_thread()`。
 
 | API | 说明 |
 |-----|------|
@@ -669,31 +702,31 @@ int main() {
 | `void stop()` | `stop` loop 并 `join`。**禁止在工作线程内调用**（assert 硬失败） |
 | `event_loop* loop() const` | 未 start / 已 stop 时为 `nullptr` |
 | `bool is_running() const` | |
-| `std::weak_ptr<void> identity() const` | 供 object 观察 worker 是否仍存活 |
+| `identity()` | 继承自 `thread` |
 
 ```cpp
 worker_thread worker;
 worker.start();
 
 Window win;
-win.move_to_thread(worker);   // 推荐；勿长期持有 worker.loop()
+win.move_to_thread(worker);
 
 connect(btn.clicked, &win, &Window::onClicked);  // Auto → 跨线程 Queued
 btn.clicked.emit();
 
-worker.stop();    // 务必在外线程 stop；此后 emit 安全跳过
+worker.stop();    // 务必在外线程 stop；此后 Queued emit 安全跳过
 worker.start();   // 再 start 后，已 move 过的 object 自动用新 loop
 btn.clicked.emit();
 worker.stop();
 ```
 
-**Tip：** 亲和绑的是 `worker_thread`，不是某次 `start` 创建的那个 `event_loop*`。因此 stop / start 循环不会留下悬空亲和。
+**Tip：** `object` 亲和持有的是 `thread*`（常为 `worker_thread*`），不是某次 `start` 的裸 `event_loop*`。
 
 ---
 
-## 13. 智能指针与 delete_later
+## 14. 智能指针与 delete_later
 
-### 13.1 类型与工厂
+### 14.1 类型与工厂
 
 ```cpp
 template <typename T>
@@ -719,7 +752,7 @@ connect(btn.clicked, win, &Window::onClicked);
 
 `object_get(p)`：从裸指针 / unique_ptr / shared_ptr 取裸指针。
 
-### 13.2 delete_later 规则摘要
+### 14.2 delete_later 规则摘要
 
 - 无亲和 loop：立即 `delete this`。
 - 正在泵目标 loop，或调用方不在亲和线程：`post` 到目标再删。
@@ -727,9 +760,9 @@ connect(btn.clicked, win, &Window::onClicked);
 
 ---
 
-## 14. 线程与生命周期注意事项
+## 15. 线程与生命周期注意事项
 
-1. **不要直接使用 `event_loop`**：请用 `core_application`（主线程）、继承 `object`（同线程槽）或 `worker_thread`（后台线程）代替。直接使用需手动管理亲和、生命周期和 `run`/`stop`，遗漏易造成悬空指针或 UAF。
+1. **不要直接使用 `event_loop`**：请用 `core_application` / `ensure_thread`（主线程）、继承 `object` 或 `worker_thread`（后台）代替。
 2. **跨线程销毁**：先停相关 `worker_thread` / 排空队列，或依赖 `delete_later`。
 3. **派生析构第一行 `invalidate()`**。
 4. **BlockingQueued**：目标须 `run`；勿在正在泵的同一 loop 上对自己 `post_blocking` / `blocking_queued`。
@@ -737,11 +770,11 @@ connect(btn.clicked, win, &Window::onClicked);
 6. 主线程建议先构造 `core_application`。
 7. 堆对象优先 `object_uptr` / `object_sptr`；`connect` 不延长寿命。
 8. 跨线程 Direct 连接会降级为 Queued；无 loop 的 Queued/Blocking 会丢弃或失败。
-9. **跨线程亲和用 `move_to_thread(worker)`**：`stop` 后 emit 安全跳过，再 `start` 自动绑新 loop。避免 `move_to_thread(worker.loop())` 长期持有裸指针。
+9. **亲和只绑 `utils::thread*`**：`object::thread()` 返回句柄，`object::loop()` 用于投递。`stop` 后 Queued emit 安全跳过，再 `start` 自动绑新 loop。
 
 ---
 
-## 15. 与 Qt 对照
+## 16. 与 Qt 对照
 
 | Qt | 本库 |
 |----|------|
@@ -752,7 +785,10 @@ connect(btn.clicked, win, &Window::onClicked);
 | `Qt::ConnectionType` | `connection_type` |
 | `QMetaObject::invokeMethod` | `invoke`（`result` 取值） |
 | `QCoreApplication` | `core_application` |
-| `QThread` + 事件循环 | `worker_thread` + `event_loop` |
+| `QThread` | `utils::thread` |
+| `QThread::currentThread()` | `ensure_thread()` |
+| `QThread` + 工作线程 | `worker_thread` |
+| `QObject::thread()` | `object::thread()` → `thread*` |
 | `deleteLater` | `delete_later` / `object_uptr` |
 | `blockSignals` | `block_signals`（信号需 `signal{this}`） |
 | 无公开 `invalidate` | 有 `invalidate()`（因更宽松的销毁模型） |
