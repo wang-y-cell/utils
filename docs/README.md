@@ -12,6 +12,8 @@
 
 ## 并发与事件
 
+以下文档均为**使用教程**（心智模型 / 可行操作 / 异常 Tips / 分场景步骤），不是纯 API 说明书：
+
 - [信号槽与事件循环](./concurrency/signal_and_slots.md)
 - [线程池](./concurrency/thread_pool.md)
 - [Channel](./concurrency/channel.md)
