@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * signal_and_slots — 轻量 Qt 风格信号/槽 + 事件循环（C++17 header-only）
+ * signal_and_slots — 轻量 Qt 风格信号/槽 + 事件循环（C++20 header-only）
  *
  * 日常用法：
  *   #include "signal_and_slots.h"
@@ -23,17 +23,16 @@
  *   - emit(Args...) 按值入参（decay-copy）；Queued 再打包进队列
  *   - event_loop：post / 延迟定时器 / 周期定时器 / process_events（budget
  *     内可候定时器）
- *   - thread / ensure_thread：线程亲和句柄（仿 QThread / currentThread）
- *   - worker_thread：后台线程（继承 thread）；禁止在工作线程内 stop
- *   - core_application：主线程注册 ensure_thread()
- *   - ensure_thread_loop()：兼容薄包装，等价 ensure_thread()->loop()
+ *   - thread / current_thread / worker_thread：线程亲和句柄（仿 QThread）
+ *     current_thread：本线程 run；worker_thread：新线程 run；均含 start/stop/loop
+ *   - core_application：主线程注册 ensure_thread()；exec() → thread::start()
  *   - connect 语法糖；emit / connect 丢弃槽返回值
  *   - invoke(槽)：Direct / BlockingQueued 用 result<T> 取回 slots_t 中的值
  *   - invoke(object*, type, fn, args...)：在目标线程调用普通函数/lambda，result
  *     取返回值
  *   - invoke(object*, function<void()>)：只投递无返回值任务（不取 result）
  *
- * 命名空间：utils（旧名 qto 仍可用别名兼容）
+ * 命名空间：utils
  *
  * 使用注意：
  *   1) 跨线程 object 销毁前先 worker_thread::stop() / 排空队列
@@ -41,14 +40,16 @@
  *      process_events 排空）（堆对象优先 object_uptr / delete_later，可减少手动
  *      invalidate）
  *   3) 跨线程 Direct 会自动降级为 Queued；Queued/BlockingQueued 无 loop 则丢弃
- *      BlockingQueued 要求目标 loop 正在 run；对正在泵的本 loop post_blocking
- *      会失败（防自死锁）
+ *      BlockingQueued 要求目标 loop 正在泵（is_pumping）；未泵则跳过/失败，避免死等
+ *      仅当「当前线程正在泵本 loop」时 post_blocking 因自死锁失败
+ *      跨线程且无 loop 时 Auto/Direct 不再降级为发射线程 Direct，直接跳过
  *   4) 禁止在工作线程里调用 worker_thread::stop()（硬失败，不销毁 loop）
  *   5) 主线程建议先构造 core_application（或依赖 object 内 ensure_thread）
  *   6) 堆上 object 建议只用 object_uptr/object_sptr 拥有；connect 仅观察不延长寿命
- *   7) 亲和只绑 utils::thread*（move_to_thread）；object::thread() 返回 thread*，
- *      投递用 object::loop()。绑 worker 后 stop 再 Queued emit 安全跳过，再 start
- *      自动绑新 loop。
+ *   7) 亲和只绑 utils::thread*（move_to_thread）；同线程判断比较 thread*。
+ *      投递用 object::loop_shared() / loop()。绑 worker 后 stop 再 Queued/Auto emit 安全跳过，再 start
+ *      自动绑新 loop。不要用 event_loop* 做亲和。
+ *   8) event_loop 泵送时吞掉单任务异常，避免单个 Queued 槽打穿整条循环
  */
 #include <algorithm>
 #include <atomic>
@@ -87,7 +88,8 @@ inline constexpr bool unique_connection = true;
 * @brief 槽函数返回类型：标记「这是槽」，需要时带一个值。
 * @note connect / emit 丢弃返回值；只有 invoke 会 get()。
 */
-template <class T = void> class slots_t {
+template <class T = void> 
+class slots_t {
 	T value_{};
 
 public:
@@ -96,7 +98,9 @@ public:
 	slots_t(slots_t &&) = default;
 	slots_t &operator=(const slots_t &) = default;
 	slots_t &operator=(slots_t &&) = default;
-	operator T() const noexcept { return value_; }
+	operator T() const noexcept(std::is_nothrow_copy_constructible_v<T>) {
+		return value_;
+	}
 
 	template <class U,
 		std::enable_if_t<!std::is_same_v<std::decay_t<U>, slots_t> &&
@@ -109,57 +113,34 @@ public:
 	T get() && noexcept { return std::move(value_); }
 };
 
-template <> class slots_t<void> {
-	public:
-		slots_t() = default;
+template <> 
+class slots_t<void> {
+public:
+	slots_t() = default;
 };
 
 class event_loop;
 class object;
 class thread;
 
-/**
-* 每线程可有默认 event_loop（tls_default_loop）与正在泵的
-* loop（tls_running_loop）。 线程亲和身份见 utils::thread /
-* ensure_thread()；loop 仅作投递。
-*/
-inline thread_local event_loop *tls_default_loop = nullptr;
-inline thread_local event_loop *tls_running_loop = nullptr;
 /// 当前 OS 线程的 utils::thread 句柄（worker 运行时指向该 worker）
 inline thread_local thread *tls_current_thread = nullptr;
-
-/// 当前线程 loop：优先返回正在泵的，否则返回默认 loop
-inline event_loop *current_thread_loop() noexcept {
-	if (tls_running_loop)
-		return tls_running_loop;
-	return tls_default_loop;
-}
+/// 当前 OS 线程正在泵的 event_loop（仅本线程可见；用于 post_blocking 防自死锁）
+inline thread_local event_loop *tls_pumping_loop = nullptr;
 
 // 前向声明；定义在 event_loop / thread 类之后
-inline event_loop *ensure_thread_loop();
 inline thread *ensure_thread();
 
 namespace detail {
 
-/// 泵 loop 时临时占用 TLS；退出时必须还原，避免栈上 loop 把默认指针留成悬空。
-struct event_loop_tls_scope {
-	event_loop *prev_running;
-	event_loop *prev_default;
-
-	explicit event_loop_tls_scope(event_loop *self) noexcept
-		: prev_running(tls_running_loop), prev_default(tls_default_loop) {
-		tls_running_loop = self;
-		if (!tls_default_loop)
-			tls_default_loop = self;
-	}
-
-	~event_loop_tls_scope() {
-		tls_running_loop = prev_running;
-		tls_default_loop = prev_default;
-	}
-
-	event_loop_tls_scope(const event_loop_tls_scope &) = delete;
-	event_loop_tls_scope &operator=(const event_loop_tls_scope &) = delete;
+/// 泵 loop 时标记本线程 tls_pumping_loop 与对象泵送深度。
+struct event_loop_pump_scope {
+	event_loop *self;
+	event_loop *prev_pumping;
+	explicit event_loop_pump_scope(event_loop *loop) noexcept;
+	~event_loop_pump_scope();
+	event_loop_pump_scope(const event_loop_pump_scope &) = delete;
+	event_loop_pump_scope &operator=(const event_loop_pump_scope &) = delete;
 };
 
 } // namespace detail
@@ -179,8 +160,8 @@ public:
 
 	~event_loop() { stop(); }
 
-	/** @brief 将任务添加到任务队列中 */
-	void post(task task_) { (void)post_impl(std::move(task_)); }
+	/** @brief 将任务添加到任务队列中；未 accepting 时返回 false 并丢弃 */
+	bool post(task task_) { return post_impl(std::move(task_)); }
 
 	/**
 	*@brief 将阻塞任务添加到队列中，添加成功则返回true，否则返回false
@@ -191,29 +172,53 @@ public:
 	bool post_blocking(task task_) {
 		if (!task_)
 			return false;
-		// 正在泵本 loop 时再阻塞等待自己 → 死锁；拒绝投递
-		if (tls_running_loop == this)
+		// 仅当「当前线程」正在泵「本」loop 时拒绝（防自死锁）。
+		if (tls_pumping_loop == this)
+			return false;
+		// 目标无人泵送时阻塞等待会死等（如主线程未 exec）；直接失败。
+		if (!is_pumping())
 			return false;
 		auto state = std::make_shared<blocking_post_state>();
 		if (!post_impl([task_ = std::move(task_), state]() mutable {
-			try {
-				task_();
-			} catch (...) {
+				{
+					std::lock_guard<std::mutex> lock(state->mutex);
+					if (state->st == blocking_post_state::phase::cancelled)
+						return;
+					state->st = blocking_post_state::phase::running;
+				}
+				try {
+					task_();
+				} catch (...) {
+					std::lock_guard<std::mutex> lock(state->mutex);
+					state->error = std::current_exception();
+					state->st = blocking_post_state::phase::done;
+					state->cv.notify_one();
+					return;
+				}
 				std::lock_guard<std::mutex> lock(state->mutex);
-				state->error = std::current_exception();
-				state->done = true;
+				state->st = blocking_post_state::phase::done;
 				state->cv.notify_one();
-				return;
-			}
-			std::lock_guard<std::mutex> lock(state->mutex);
-			state->done = true;
-			state->cv.notify_one();
-		})) {
+			})) {
 			return false;
 		}
 		{
 			std::unique_lock<std::mutex> lock(state->mutex);
-			state->cv.wait(lock, [&] { return state->done; });
+			using phase = blocking_post_state::phase;
+			while (state->st == phase::pending || state->st == phase::running) {
+				if (state->cv.wait_for(lock, std::chrono::milliseconds(1), [&] {
+						return state->st == phase::done ||
+							state->st == phase::cancelled;
+					})) {
+					break;
+				}
+				if (!is_pumping() && state->st == phase::pending) {
+					state->st = phase::cancelled;
+					state->cv.notify_one();
+					return false;
+				}
+			}
+			if (state->st == phase::cancelled)
+				return false;
 		}
 		if (state->error)
 			std::rethrow_exception(state->error);
@@ -266,12 +271,15 @@ public:
 		_cancelled.insert(id);
 	}
 
-	/** @brief 运行事件循环 */
+	/** @brief 运行事件循环。stop() 之后不会自行恢复 accepting，需 set_accepting(true) 再 run。 */
 	void run() {
-		detail::event_loop_tls_scope tls(this);
+		detail::event_loop_pump_scope pump(this);
+		std::uint64_t epoch = 0;
 		{
 			std::lock_guard<std::mutex> lock(_mutex);
-			_running = true;
+			if (!_running)
+				return;
+			epoch = _stop_epoch;
 		}
 
 		while (true) {
@@ -285,19 +293,30 @@ public:
 						_tasks.pop();
 						break;
 					}
-					// 任务队列没有任务了
-					if (!_running) {
+					if (!_running || _stop_epoch != epoch) {
 						return;
 					}
-					if (!_timers.empty()) { // 没有任务，但是有定时任务，等待
-						_cv.wait_until(lock, _timers.top()._when);
+					if (!_timers.empty()) {
+						const auto when = _timers.top()._when;
+						_cv.wait_until(lock, when, [this, when, epoch] {
+							return !_running || _stop_epoch != epoch ||
+								!_tasks.empty() ||
+								(!_timers.empty() && _timers.top()._when < when);
+						});
 					} else {
-						_cv.wait(lock); // 任务队列没有任务，也没有定时任务
+						_cv.wait(lock, [this, epoch] {
+							return !_running || _stop_epoch != epoch ||
+								!_tasks.empty() || !_timers.empty();
+						});
 					}
 				}
 			}
-			if (task_)
-				task_(); // 执行任务
+			if (task_) {
+				try {
+					task_(); // 执行任务；单任务异常不得打穿整条事件循环
+				} catch (...) {
+				}
+			}
 		}
 	}
 
@@ -306,18 +325,39 @@ public:
 		{
 			std::lock_guard<std::mutex> lock(_mutex);
 			_running = false;
+			++_stop_epoch;
 		}
 		_cv.notify_all();
 	}
 
-	/** @brief 判断当前loop是否正在运行 */
+	/** @brief 是否仍接受 post（与 is_running 相同语义） */
 	bool is_running() const {
 		std::lock_guard<std::mutex> lock(_mutex);
 		return _running;
 	}
 
+	/// 恢复接受 post（current_thread 在本线程 start 返回后调用）
+	void set_accepting(bool on) {
+		{
+			std::lock_guard<std::mutex> lock(_mutex);
+			_running = on;
+		}
+		if (on)
+			_cv.notify_all();
+	}
+
+	/** @brief 当前是否正在 run()/process_events() 泵送（任意驱动线程） */
+	bool is_pumping() const noexcept {
+		return _pumping_depth.load(std::memory_order_acquire) > 0;
+	}
+
+	/** @brief 当前 OS 线程是否正在泵「本」loop（post_blocking 防自死锁用） */
+	bool is_pumping_on_current_thread() const noexcept {
+		return tls_pumping_loop == this;
+	}
+
 	/**
-	* @brief 处理已到期的定时器与已排队任务；可选最长等待。会临时设置 tls。
+	* @brief 处理已到期的定时器与已排队任务；可选最长等待。
 	* @note 无 budget：只排空当前到期/已排队任务，不等待未来定时器（供 invalidate
 	* 排空）。 有 budget：空闲时可 wait 到下一定时器或 deadline。
 	*/
@@ -325,7 +365,7 @@ public:
 		const auto deadline =
 			budget ? std::optional<clock::time_point>(clock::now() + *budget)
 				: std::nullopt;
-		detail::event_loop_tls_scope tls(this);
+		detail::event_loop_pump_scope pump(this);
 
 		while (!deadline || clock::now() < *deadline) {
 			task task_;
@@ -347,16 +387,23 @@ public:
 					break;
 				}
 			}
-			if (task_)
-				task_();
+			if (task_) {
+				try {
+					task_();
+				} catch (...) {
+				}
+			}
 		}
 	}
 
 private:
+	friend struct detail::event_loop_pump_scope;
+
 	struct blocking_post_state {
+		enum class phase { pending, running, done, cancelled };
 		std::mutex mutex;
 		std::condition_variable cv;
-		bool done = false;
+		phase st = phase::pending;
 		std::exception_ptr error;
 	};
 
@@ -388,7 +435,10 @@ private:
 						if (_cancelled.erase(id) > 0)
 							return;
 					}
-					body();
+					try {
+						body();
+					} catch (...) {
+					}
 					std::lock_guard<std::mutex> lock(_mutex);
 					if (!_running)
 						return;
@@ -438,8 +488,25 @@ private:
 	_timers;
 	std::unordered_set<timer_id> _cancelled;
 	bool _running = true;
+	std::uint64_t _stop_epoch = 0;
+	std::atomic<int> _pumping_depth{0};
 	timer_id _next_timer_id = 1;
 };
+
+inline detail::event_loop_pump_scope::event_loop_pump_scope(
+	event_loop *loop) noexcept
+	: self(loop), prev_pumping(tls_pumping_loop) {
+	if (self) {
+		self->_pumping_depth.fetch_add(1, std::memory_order_release);
+		tls_pumping_loop = self;
+	}
+}
+
+inline detail::event_loop_pump_scope::~event_loop_pump_scope() {
+	if (self)
+		self->_pumping_depth.fetch_sub(1, std::memory_order_release);
+	tls_pumping_loop = prev_pumping;
+}
 
 // =============================================================================
 // thread：线程亲和句柄（仿 QThread）；current_thread / worker_thread
@@ -450,8 +517,14 @@ public:
 	thread &operator=(const thread &) = delete;
 	virtual ~thread() = default;
 
-	virtual event_loop *loop() const = 0;
+	/// 启动事件循环：current_thread 在本线程阻塞泵；worker_thread 起新线程
+	virtual void start() = 0;
+	/// 停止事件循环（worker 会 join；禁止在 worker 自身线程内调用）
+	virtual void stop() = 0;
 	virtual bool is_running() const = 0;
+	/// 投递用 event_loop；worker 已 stop 时可能为空
+	virtual std::shared_ptr<event_loop> loop_shared() const = 0;
+	event_loop *loop() const { return loop_shared().get(); }
 
 	std::weak_ptr<void> identity() const noexcept { return _identity; }
 
@@ -463,22 +536,35 @@ protected:
 /// 代表「当前 OS 线程」的句柄（不 spawn）；拥有本线程默认 event_loop
 class current_thread final : public thread {
 public:
-	current_thread() : _loop(std::make_unique<event_loop>()) {
-		tls_default_loop = _loop.get();
-	}
+	current_thread() : _loop(std::make_shared<event_loop>()) {}
 
 	~current_thread() override {
-		if (tls_default_loop == _loop.get())
-			tls_default_loop = nullptr;
 		if (tls_current_thread == this)
 			tls_current_thread = nullptr;
 	}
 
-	event_loop *loop() const override { return _loop.get(); }
-	bool is_running() const override { return _loop && _loop->is_running(); }
+	void start() override {
+		if (!_loop)
+			return;
+		_loop->run();
+		// 本线程泵结束后仍接受 post，供后续 process_events / 再次 start
+		_loop->set_accepting(true);
+	}
+
+	void stop() override {
+		// 仅在正在泵时 stop，避免把共享的 ensure_thread loop 永久关掉
+		if (_loop && _loop->is_pumping())
+			_loop->stop();
+	}
+
+	std::shared_ptr<event_loop> loop_shared() const override { return _loop; }
+
+	bool is_running() const override {
+		return _loop && _loop->is_running();
+	}
 
 private:
-	std::unique_ptr<event_loop> _loop;
+	std::shared_ptr<event_loop> _loop;
 };
 
 /// 当前线程句柄（仿 QThread::currentThread）
@@ -491,9 +577,6 @@ inline thread *ensure_thread() {
 	tls_current_thread = owned.get();
 	return tls_current_thread;
 }
-
-/// 当前线程默认 event_loop（兼容旧调用；等价于 ensure_thread()->loop()）
-inline event_loop *ensure_thread_loop() { return ensure_thread()->loop(); }
 
 /// 仿 QCoreApplication：主线程注册默认 loop + 线程句柄
 class core_application {
@@ -508,11 +591,10 @@ public:
 	event_loop *loop() const noexcept {
 		return _thread ? _thread->loop() : nullptr;
 	}
-	/** @brief 执行事件循环 */
+	/** @brief 执行事件循环（本线程 start） */
 	int exec() {
-		event_loop *loop_ = loop();
-		if (loop_)
-			loop_->run();
+		if (_thread)
+			_thread->start();
 		return 0;
 	}
 
@@ -531,23 +613,21 @@ public:
 
 	~worker_thread() override { stop(); }
 
-	void start() {
+	void start() override {
 		std::lock_guard<std::mutex> lock(_mutex);
 		if (_std_thread.joinable())
 			return;
-		_loop = std::make_unique<event_loop>();
-		event_loop *loop_ = _loop.get();
+		_loop = std::make_shared<event_loop>();
+		auto loop_ = _loop;
 		_std_thread = std::thread([this, loop_]() {
-			tls_default_loop = loop_;
 			tls_current_thread = this; // 本 OS 线程的 ensure_thread() → 本 worker
 			loop_->run();
 			tls_current_thread = nullptr;
-			tls_default_loop = nullptr;
 		});
 	}
 
-	void stop() {
-		std::unique_ptr<event_loop> loop_;
+	void stop() override {
+		std::shared_ptr<event_loop> loop_;
 		std::thread th;
 		{
 			std::lock_guard<std::mutex> lock(_mutex);
@@ -570,9 +650,9 @@ public:
 			th.join();
 	}
 
-	event_loop *loop() const override {
+	std::shared_ptr<event_loop> loop_shared() const override {
 		std::lock_guard<std::mutex> lock(_mutex);
-		return _loop.get();
+		return _loop;
 	}
 
 	bool is_running() const override {
@@ -582,7 +662,7 @@ public:
 
 private:
 	mutable std::mutex _mutex;
-	std::unique_ptr<event_loop> _loop;
+	std::shared_ptr<event_loop> _loop;
 	std::thread _std_thread;
 };
 
@@ -662,7 +742,7 @@ public:
 	virtual ~object() { invalidate(); }
 
 	/// 提前失效。派生类析构函数第一行必须调用。
-	void invalidate() noexcept {
+	void invalidate() {
 		bool expected = true;
 		if (!_valid.compare_exchange_strong(expected, false))
 			return;
@@ -680,8 +760,8 @@ public:
 			if (s->_disconnect_fn)
 				s->_disconnect_fn();
 		}
-		event_loop *loop_ = loop();
-		if (loop_ && current_thread_loop() == loop_) {
+		auto loop_ = loop_shared();
+		if (loop_ && thread() == ensure_thread()) {
 			loop_->process_events();
 		}
 	}
@@ -706,11 +786,12 @@ public:
 		return _affinity;
 	}
 
-	/// 解析出的投递 loop；绑 worker 且已 stop / 句柄已毁时可能为 nullptr
-	event_loop *loop() const noexcept {
+	/// 解析出的投递 loop；绑 worker 且已 stop / 句柄已毁时可能为空
+	std::shared_ptr<event_loop> loop_shared() const noexcept {
 		utils::thread *t = thread();
-		return t ? t->loop() : nullptr;
+		return t ? t->loop_shared() : nullptr;
 	}
+	event_loop *loop() const noexcept { return loop_shared().get(); }
 
 	/// 若亲和为 worker_thread 则返回之，否则 nullptr
 	worker_thread *worker() const noexcept {
@@ -718,13 +799,16 @@ public:
 	}
 
 	void delete_later() {
-		event_loop *loop_ = loop();
+		utils::thread *aff = thread();
+		auto loop_ = loop_shared();
 		if (!loop_) {
 			delete this;
 			return;
 		}
-		if (tls_running_loop == loop_ || current_thread_loop() != loop_) {
-			loop_->post([this] { delete this; });
+		// 不在亲和线程，或本线程正在泵亲和 loop：post 后再删
+		if (ensure_thread() != aff || loop_->is_pumping_on_current_thread()) {
+			if (!loop_->post([this] { delete this; }))
+				delete this;
 			return;
 		}
 		delete this;
@@ -742,9 +826,12 @@ public:
 		return _signals_blocked.load(std::memory_order_acquire);
 	}
 
-	void track_inbound(const std::shared_ptr<connection_state> &state) {
+	bool track_inbound(const std::shared_ptr<connection_state> &state) {
 		std::lock_guard<std::mutex> lock(_inbound_mutex);
+		if (!_valid.load(std::memory_order_acquire))
+			return false;
 		_inbound.push_back(state);
+		return true;
 	}
 
 	void untrack_inbound(std::uint64_t id) {
@@ -978,19 +1065,20 @@ public:
 			return;
 		std::vector<std::shared_ptr<connection_state>> states;
 		{
-			std::lock_guard<std::mutex> lock(_mutex);
-			for (auto &e : _entries) {
+			std::lock_guard<std::mutex> lock(_ctl->mutex);
+			for (auto &e : _ctl->entries) {
 				if (e._receiver != receiver || !e._state)
 					continue;
 				if (e._state->_alive.exchange(false, std::memory_order_acq_rel)) {
 					states.push_back(e._state);
 				}
 			}
-			_entries.erase(std::remove_if(_entries.begin(), _entries.end(),
+			_ctl->entries.erase(std::remove_if(_ctl->entries.begin(),
+				_ctl->entries.end(),
 				[receiver](const entry &e) {
 				return e._receiver == receiver;
 			}),
-				_entries.end());
+				_ctl->entries.end());
 		}
 		for (auto &s : states) {
 			if (s && s->_disconnect_fn)
@@ -1014,21 +1102,20 @@ public:
 	void disconnect_all() {
 		std::vector<std::shared_ptr<connection_state>> states;
 		{
-			std::lock_guard<std::mutex> lock(_mutex);
-			for (auto &e : _entries) {
+			std::lock_guard<std::mutex> lock(_ctl->mutex);
+			for (auto &e : _ctl->entries) {
 				if (e._state)
-					states.push_back(e._state); // 如果连接状态不为空，则添加到states中
+					states.push_back(e._state);
 			}
-			_entries.clear(); // 清空_entries
+			_ctl->entries.clear();
 		}
 		for (auto &s : states) {
 			if (!s)
 				continue;
 			if (!s->_alive.exchange(false, std::memory_order_acq_rel))
 				continue;
-			// _disconnect_fn 会再次抢 _mutex 移除（已空）并 untrack
 			if (s->_disconnect_fn)
-				s->_disconnect_fn(); // 如果连接状态的_disconnect_fn不为空，则调用它
+				s->_disconnect_fn();
 		}
 	}
 
@@ -1036,26 +1123,32 @@ public:
 	/// move-only 参数：多个 Queued 连接时仅第一次 move
 	/// 有效，宜单连接或改用可拷贝包装。
 	void emit(Args... args) const {
-		if (signals_blocked()) // 如果当前信号是阻塞状态,也就是说这个信号是blocking类型且被阻塞了,则直接返回,不进行emit
+		if (signals_blocked())
 			return;
-		// thread_local的生命周期是伴随整个线程的,这是一个长期存活的对象
 		thread_local std::vector<entry> tls_scratch;
-		std::vector<entry> snapshot;
-		snapshot.swap(tls_scratch); // snapshot获得tls_scratch的值,并清空tls_scratch
-		snapshot.clear();
+		struct snapshot_guard {
+			std::vector<entry> &tls;
+			std::vector<entry> snapshot;
+			explicit snapshot_guard(std::vector<entry> &t) : tls(t) {
+				snapshot.swap(tls);
+				snapshot.clear();
+			}
+			~snapshot_guard() {
+				snapshot.clear();
+				tls.swap(snapshot);
+			}
+		} guard(tls_scratch);
+		auto &snapshot = guard.snapshot;
 		{
-			std::lock_guard<std::mutex> lock(_mutex);
-			snapshot.reserve(
-				_entries.size()); // 将这个临时vector的容量设置为_entries的大小
-			for (const auto &e : _entries) {
-				// 如果连接状态不为空且连接状态存活,则将这个连接添加到snapshot中
+			std::lock_guard<std::mutex> lock(_ctl->mutex);
+			snapshot.reserve(_ctl->entries.size());
+			for (const auto &e : _ctl->entries) {
 				if (e._state && e._state->_alive.load(std::memory_order_acquire)) {
 					snapshot.push_back(e);
 				}
 			}
 		}
 
-		// 将参数打包成一个tuple
 		auto make_bound_args = [&] {
 			if constexpr ((std::is_copy_constructible_v<Args> && ...)) {
 				return std::make_tuple(args...);
@@ -1064,95 +1157,98 @@ public:
 			}
 		};
 
-		// 遍历snapshot中的每个连接,这是遍历每个槽函数连接
+		auto invoke_queued = [](const std::shared_ptr<slot> &bound_slot,
+			auto &&bound_args, const std::weak_ptr<void> &weak,
+			object *receiver) {
+			auto gate = weak.lock();
+			if (!gate)
+				return;
+			if (receiver && !receiver->is_valid())
+				return;
+			std::apply(*bound_slot, std::move(bound_args));
+		};
+
 		for (const auto &e : snapshot) {
-			// 如果连接状态不存活,则直接跳过
-			if (!e._state->_alive.load(std::memory_order_acquire))
+			if (!e._state || !e._slot ||
+				!e._state->_alive.load(std::memory_order_acquire))
 				continue;
 
-			event_loop *target_loop = nullptr;
-			if (e._receiver) { // 如果接收者不为空,则获取接收者的生存期
-				auto gate = e._receiver_alive.lock(); // 获取接收者的生存期
-				if (!gate) // 如果接收者的生存期为空,则直接跳过
+			std::shared_ptr<void> gate;
+			std::shared_ptr<event_loop> target_loop;
+			utils::thread *target_thread = nullptr;
+			if (e._receiver) {
+				gate = e._receiver_alive.lock();
+				if (!gate)
 					continue;
-				if (!e._receiver->is_valid()) // 如果接收者不有效,则直接跳过
+				if (!e._receiver->is_valid())
 					continue;
-				target_loop = e._receiver->loop(); // 获取接收者的亲和 loop
-			} else if (e._receiver_alive
-			.expired()) { // 如果接收者的生存期为空,则直接跳过
+				target_thread = e._receiver->thread();
+				target_loop = e._receiver->loop_shared();
+			} else if (e._receiver_alive.expired()) {
 				continue;
 			}
 
-			// 判断当前线程是否与接收者在同一个线程
-			const bool same_thread = (target_loop == current_thread_loop());
+			const bool same_thread =
+				(target_thread != nullptr && target_thread == ensure_thread());
 
-			bool use_direct = false;   // 是否使用直接调用
-			bool use_blocking = false; // 是否使用阻塞调用
+			bool use_direct = false;
+			bool use_blocking = false;
 			if (e._type == connection_type::queued) {
-				if (!target_loop) // 如果亲和loop为空,则直接跳过
+				if (!target_loop)
 					continue;
 				use_direct = false;
 			} else if (e._type == connection_type::blocking_queued) {
 				if (same_thread) {
 					use_direct = true;
-				} else if (!target_loop || !target_loop->is_running()) {
+				} else if (!target_loop || !target_loop->is_pumping()) {
 					continue;
 				} else {
 					use_blocking = true;
 				}
 			} else if (e._type == connection_type::direct) {
-				if (same_thread || !target_loop) {
+				if (same_thread) {
 					use_direct = true;
+				} else if (!target_loop) {
+					continue;
 				} else {
 					use_direct = false;
 				}
 			} else {
-				use_direct = same_thread || !target_loop;
+				if (same_thread) {
+					use_direct = true;
+				} else if (!target_loop) {
+					continue;
+				} else {
+					use_direct = false;
+				}
 			}
 
 			if (use_direct) {
-				if (e._receiver &&
-					(!e._receiver->is_valid() || e._receiver_alive.expired())) {
+				if (e._receiver && (!gate || !e._receiver->is_valid()))
 					continue;
-				}
-				e._slot(args...);
+				(*e._slot)(args...);
 			} else if (use_blocking) {
 				if (!target_loop)
 					continue;
-				auto bound_slot = e._slot;
-				auto bound_args = make_bound_args();
-				auto weak = e._receiver_alive;
-				object *receiver = e._receiver;
-				(void)target_loop->post_blocking([bound_slot = std::move(bound_slot),
-					bound_args = std::move(bound_args),
-					weak, receiver]() mutable {
-					if (!weak.lock())
-						return;
-					if (receiver && !receiver->is_valid())
-						return;
-					std::apply(bound_slot, std::move(bound_args));
+				(void)target_loop->post_blocking(
+					[bound_slot = e._slot, bound_args = make_bound_args(),
+						weak = e._receiver_alive, receiver = e._receiver,
+						invoke_queued]() mutable {
+					invoke_queued(bound_slot, std::move(bound_args), weak,
+						receiver);
 				});
 			} else {
 				if (!target_loop)
 					continue;
-				auto bound_slot = e._slot;
-				auto bound_args = make_bound_args();
-				auto weak = e._receiver_alive;
-				object *receiver = e._receiver;
-				target_loop->post([bound_slot = std::move(bound_slot),
-					bound_args = std::move(bound_args), weak,
-					receiver]() mutable {
-					if (!weak.lock())
-						return;
-					if (receiver && !receiver->is_valid())
-						return;
-					std::apply(bound_slot, std::move(bound_args));
+				(void)target_loop->post(
+					[bound_slot = e._slot, bound_args = make_bound_args(),
+						weak = e._receiver_alive, receiver = e._receiver,
+						invoke_queued]() mutable {
+					invoke_queued(bound_slot, std::move(bound_args), weak,
+						receiver);
 				});
 			}
 		}
-
-		snapshot.clear();
-		tls_scratch.swap(snapshot);
 	}
 
 	void operator()(Args... args) const { emit(std::move(args)...); }
@@ -1194,12 +1290,18 @@ private:
 
 	/// 整条连接的各种信息,包括连接状态,信号和槽函数对象,连接类型,槽函数键
 	struct entry {
-		std::shared_ptr<connection_state> _state; // 连接状态
-		object *_receiver = nullptr;              // 接收信号的object对象
-		std::weak_ptr<void> _receiver_alive;      // 接收信号的object对象是否存活
-		slot _slot;
+		std::shared_ptr<connection_state> _state;
+		object *_receiver = nullptr;
+		std::weak_ptr<void> _receiver_alive;
+		std::shared_ptr<slot> _slot;
 		connection_type _type = connection_type::automatic;
 		slot_key _key;
+	};
+
+	struct control {
+		mutable std::mutex mutex;
+		std::vector<entry> entries;
+		std::uint64_t next_id = 1;
 	};
 
 	template <class M> static slot_key make_pmf_key(object *receiver, M method) {
@@ -1218,56 +1320,59 @@ private:
 		auto state = std::make_shared<connection_state>();
 		std::uint64_t id = 0;
 		{
-			std::lock_guard<std::mutex> lock(_mutex);
+			std::lock_guard<std::mutex> lock(_ctl->mutex);
 			if (unique && key.equal) {
-				for (const auto &e : _entries) {
+				for (const auto &e : _ctl->entries) {
 					if (e._state && e._state->_alive.load(std::memory_order_acquire) &&
 						e._key.matches(key)) {
 						return {};
 					}
 				}
 			}
-			id = _next_id++;
+			id = _ctl->next_id++;
 			state->_id = id;
-			state->_disconnect_fn = [this, id, receiver]() {
-				{
-					std::lock_guard<std::mutex> lock(_mutex);
-					_entries.erase(std::remove_if(_entries.begin(), _entries.end(),
+			std::weak_ptr<control> wctl = _ctl;
+			std::weak_ptr<void> wrecv =
+				receiver ? receiver->lifetime() : std::weak_ptr<void>{};
+			state->_disconnect_fn = [wctl, id, wrecv, receiver]() {
+				if (auto ctl = wctl.lock()) {
+					std::lock_guard<std::mutex> lock(ctl->mutex);
+					ctl->entries.erase(std::remove_if(ctl->entries.begin(),
+						ctl->entries.end(),
 						[id](const entry &e) {
-						return e._state &&
-							e._state->_id == id;
+						return e._state && e._state->_id == id;
 					}),
-						_entries.end());
+						ctl->entries.end());
 				}
-				if (receiver)
+				if (receiver && wrecv.lock())
 					receiver->untrack_inbound(id);
 			};
 
 			entry e;
 			e._state = state;
 			e._receiver = receiver;
-			// 无 receiver：用永不过期哨兵，避免 weak_ptr{} 的 expired()==true
 			e._receiver_alive =
 				receiver ? receiver->lifetime() : std::weak_ptr<void>(_forever);
-			e._slot = std::move(slot_);
+			e._slot = std::make_shared<slot>(std::move(slot_));
 			e._type = type;
 			e._key = std::move(key);
-			_entries.push_back(std::move(e));
+			_ctl->entries.push_back(std::move(e));
 		}
 
-		if (receiver)
-			receiver->track_inbound(
-				state); // 如果receiver不为空，则将连接状态添加到_inbound中
+		if (receiver && !receiver->track_inbound(state)) {
+			if (state->_alive.exchange(false, std::memory_order_acq_rel) &&
+				state->_disconnect_fn) {
+				state->_disconnect_fn();
+			}
+			return {};
+		}
 		return connection{std::move(state)};
 	}
 
-	mutable std::mutex _mutex;
-	std::vector<entry> _entries; // 这个信号有多少槽函数连接
-	std::uint64_t _next_id = 1;
-	object *_owner = nullptr;          // 信号的拥有者
-	std::weak_ptr<void> _owner_alive;  // 信号的拥有者是否存活
-	std::atomic<bool> _blocked{false}; // 信号是否被阻塞
-	// 无 receiver 连接的存活哨兵
+	std::shared_ptr<control> _ctl = std::make_shared<control>();
+	object *_owner = nullptr;
+	std::weak_ptr<void> _owner_alive;
+	std::atomic<bool> _blocked{false};
 	std::shared_ptr<void> _forever = std::make_shared<char>('\0');
 };
 
@@ -1302,8 +1407,8 @@ private:
 			r.error = std::errc::invalid_argument;
 			return r;
 		}
-		event_loop *loop_ = obj->loop();
-		const bool same_thread = (loop_ == current_thread_loop());
+		auto loop_ = obj->loop_shared();
+		const bool same_thread = (obj->thread() == ensure_thread());
 
 		if (type == connection_type::queued) {
 			r.error = std::errc::operation_in_progress;
@@ -1312,7 +1417,7 @@ private:
 		if (type == connection_type::blocking_queued) {
 			if (same_thread) {
 				r.use_direct = true;
-			} else if (!loop_ || !loop_->is_running()) {
+			} else if (!loop_ || !loop_->is_pumping()) {
 				r.error = std::errc::operation_not_permitted;
 			} else {
 				r.use_blocking = true;
@@ -1320,16 +1425,19 @@ private:
 			return r;
 		}
 		if (type == connection_type::direct) {
-			if (same_thread || !loop_) {
+			if (same_thread) {
 				r.use_direct = true;
+			} else if (!loop_) {
+				r.error = std::errc::operation_not_permitted;
 			} else {
 				r.error = std::errc::operation_in_progress;
 			}
 			return r;
 		}
-		// automatic
-		if (same_thread || !loop_) {
+		if (same_thread) {
 			r.use_direct = true;
+		} else if (!loop_) {
+			r.error = std::errc::operation_not_permitted;
 		} else {
 			r.error = std::errc::operation_in_progress;
 		}
@@ -1352,7 +1460,8 @@ private:
 			return result_err(route.error);
 
 		auto call = [&]() -> result<R> {
-			if (!obj->is_valid() || !obj->lifetime().lock()) {
+			auto gate = obj->lifetime().lock();
+			if (!gate || !obj->is_valid()) {
 				return result_err(std::errc::owner_dead);
 			}
 			if constexpr (std::is_void_v<R>) {
@@ -1368,7 +1477,9 @@ private:
 		if (!route.use_blocking)
 			return result_err(std::errc::operation_in_progress);
 
-		event_loop *loop_ = obj->loop();
+		auto loop_ = obj->loop_shared();
+		if (!loop_)
+			return result_err(std::errc::operation_not_permitted);
 		auto out =
 			std::make_shared<result<R>>(result_err(std::errc::operation_canceled));
 		std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
@@ -1376,7 +1487,8 @@ private:
 		const bool posted = loop_->post_blocking([receiver, method,
 			bound_args = std::move(bound_args),
 			weak, obj, out]() mutable {
-			if (!weak.lock() || !obj->is_valid()) {
+			auto gate = weak.lock();
+			if (!gate || !obj->is_valid()) {
 				*out = result<R>(result_err(std::errc::owner_dead));
 				return;
 			}
@@ -1419,7 +1531,8 @@ private:
 		auto fn_store = std::decay_t<F>(std::forward<F>(fn));
 
 		auto call = [&]() -> result<R> {
-			if (!receiver->is_valid() || !receiver->lifetime().lock()) {
+			auto gate = receiver->lifetime().lock();
+			if (!gate || !receiver->is_valid()) {
 				return result_err(std::errc::owner_dead);
 			}
 			if constexpr (std::is_void_v<R>) {
@@ -1435,7 +1548,9 @@ private:
 		if (!route.use_blocking)
 			return result_err(std::errc::operation_in_progress);
 
-		event_loop *loop_ = receiver->loop();
+		auto loop_ = receiver->loop_shared();
+		if (!loop_)
+			return result_err(std::errc::operation_not_permitted);
 		auto out =
 			std::make_shared<result<R>>(result_err(std::errc::operation_canceled));
 		std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
@@ -1443,7 +1558,8 @@ private:
 		const bool posted = loop_->post_blocking([fn_store = std::move(fn_store),
 			bound_args = std::move(bound_args),
 			weak, receiver, out]() mutable {
-			if (!weak.lock() || !receiver->is_valid()) {
+			auto gate = weak.lock();
+			if (!gate || !receiver->is_valid()) {
 				*out = result<R>(result_err(std::errc::owner_dead));
 				return;
 			}
@@ -1579,8 +1695,8 @@ inline void invoke(object *receiver, std::function<void()> fn,
 	if (!receiver || !fn)
 		return;
 
-	event_loop *loop_ = receiver->loop();
-	const bool same_thread = (loop_ == current_thread_loop());
+	auto loop_ = receiver->loop_shared();
+	const bool same_thread = (receiver->thread() == ensure_thread());
 
 	bool use_direct = false;
 	bool use_blocking = false;
@@ -1590,19 +1706,32 @@ inline void invoke(object *receiver, std::function<void()> fn,
 	} else if (type == connection_type::blocking_queued) {
 		if (same_thread) {
 			use_direct = true;
-		} else if (!loop_ || !loop_->is_running()) {
+		} else if (!loop_ || !loop_->is_pumping()) {
 			return;
 		} else {
 			use_blocking = true;
 		}
 	} else if (type == connection_type::direct) {
-		use_direct = same_thread || !loop_;
+		if (same_thread) {
+			use_direct = true;
+		} else if (!loop_) {
+			return;
+		} else {
+			use_direct = false;
+		}
 	} else {
-		use_direct = same_thread || !loop_;
+		if (same_thread) {
+			use_direct = true;
+		} else if (!loop_) {
+			return;
+		} else {
+			use_direct = false;
+		}
 	}
 
 	if (use_direct) {
-		if (!receiver->is_valid() || !receiver->lifetime().lock())
+		auto gate = receiver->lifetime().lock();
+		if (!gate || !receiver->is_valid())
 			return;
 		fn();
 		return;
@@ -1613,14 +1742,15 @@ inline void invoke(object *receiver, std::function<void()> fn,
 	auto weak = receiver->lifetime();
 	auto wrapped = [weak = std::move(weak), fn = std::move(fn),
 		receiver]() mutable {
-		if (!weak.lock() || !receiver->is_valid())
+		auto gate = weak.lock();
+		if (!gate || !receiver->is_valid())
 			return;
 		fn();
 	};
 	if (use_blocking) {
 		(void)loop_->post_blocking(std::move(wrapped));
 	} else {
-		loop_->post(std::move(wrapped));
+		(void)loop_->post(std::move(wrapped));
 	}
 }
 
@@ -1752,5 +1882,18 @@ connection connect(signal<Args...> &signal_,
 	bool unique = false) {
 	return signal_.connect(receiver, std::forward<F>(func), type, unique);
 }
+
+template <
+	typename... Args, typename recv, typename F,
+	std::enable_if_t<std::is_invocable_v<std::decay_t<F> &, const Args &...> &&
+	!std::is_member_function_pointer_v<std::decay_t<F>>,
+	int> = 0>
+connection connect(signal<Args...> &signal_,
+	const std::weak_ptr<recv> &receiver, F &&func,
+	connection_type type = connection_type::automatic,
+	bool unique = false) {
+	return signal_.connect(receiver, std::forward<F>(func), type, unique);
+}
+
 
 } // namespace utils

@@ -85,11 +85,13 @@ public:
 
     template <class F>
     bool try_post(F&& f) {
-        if (!loop_->is_running()) {
-            return false;
-        }
-        post(std::forward<F>(f));
-        return true;
+        bool ok = false;
+        detail::post_copyable_or_shared(
+            [this, &ok](auto&& task) {
+                ok = loop_->post(std::forward<decltype(task)>(task));
+            },
+            std::forward<F>(f));
+        return ok;
     }
 
     [[nodiscard]] event_loop* target() const noexcept { return loop_; }

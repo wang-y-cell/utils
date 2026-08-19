@@ -1,6 +1,6 @@
 # Signal & Slots（`utils::signal_and_slots`）
 
-轻量 **Qt 风格** 信号/槽与事件循环库，C++17，header-only。
+轻量 **Qt 风格** 信号/槽与事件循环库，C++20，header-only。
 
 | 项 | 说明 |
 |----|------|
@@ -251,7 +251,8 @@ public:
 | `void move_to_thread(thread*)` | 绑定线程句柄；`nullptr` → `ensure_thread()` |
 | `void move_to_thread(thread&)` | 同上（含 `worker_thread&`） |
 | `thread* thread() const` | 亲和句柄（仿 `QObject::thread`）；句柄已毁为 `nullptr` |
-| `event_loop* loop() const` | 投递目标；worker 已 stop 时可能为 `nullptr` |
+| `std::shared_ptr<event_loop> loop_shared() const` | 投递目标的共享所有权；内部 `emit`/`invoke`/`delete_later` 持有它，避免与 `worker.stop()` 并发 UAF |
+| `event_loop* loop() const` | `loop_shared().get()`；worker 已 stop 时可能为 `nullptr` |
 | `worker_thread* worker() const` | `dynamic_cast`；非 worker 亲和时为 `nullptr` |
 
 ```cpp
@@ -593,31 +594,32 @@ using timer_id = std::uint64_t;
 
 | API | 说明 |
 |-----|------|
-| `void post(task)` | 入队；loop 未 running 时可能失败（内部丢弃） |
-| `bool post_blocking(task)` | 入队并阻塞等待完成；若当前正在泵**本** loop 则返回 `false`（防自死锁） |
+| `bool post(task)` | 入队；loop 未 running 时返回 `false` 并丢弃 |
+| `bool post_blocking(task)` | 入队并阻塞等待完成。**当前线程正在泵本 loop** → `false`（防自死锁）。**目标未在泵（`!is_pumping()`）** → `false`（避免对空闲主线程死等）。泵在任务开始前结束 → 取消该任务（不会稍后执行）并返回 `false`。其他线程对正在泵的 loop 阻塞投递合法（BlockingQueued） |
 | `timer_id post_delayed(duration, task)` | 延迟执行；`delay<=0` 等价 `post`，返回 id `0` |
 | `timer_id post_periodic(duration, task)` | 周期执行（首次在 interval 之后） |
 | `void cancel_timer(timer_id)` | 取消定时器 |
-| `void run()` | 阻塞泵送，直到 `stop()` |
+| `void run()` | 阻塞泵送，直到 `stop()`；**不会**在入口把 accepting 设回 true（`stop()` 之后需 `set_accepting(true)` 才能再 `run`）。单任务异常被捕获。等待定时器时若插入更早的定时器会立即醒来 |
 | `void stop()` | 结束 `run` |
-| `bool is_running() const` | |
-| `void process_events(optional<duration> budget = nullopt)` | 处理到期定时器与已排队任务。无 budget：不候未来 timer；有 budget：可 wait 到下一定时器 |
+| `bool is_running() const` | 是否仍接受 `post`（不等于正在泵） |
+| `bool is_pumping() const` | 是否有人正在 `run`/`process_events` 驱动本 loop |
+| `bool is_pumping_on_current_thread() const` | **当前 OS 线程**是否正在泵本 loop |
+| `void process_events(optional<duration> budget = nullopt)` | 处理到期定时器与已排队任务；单任务异常同样被捕获 |
 
-### 10.3 线程局部辅助
+### 10.3 获取当前线程的 loop
+
+不要再用独立的 loop TLS。当前线程的投递目标一律：
 
 ```cpp
-event_loop* current_thread_loop() noexcept;  // 优先 running，否则 default
-event_loop* ensure_thread_loop();            // 等价 ensure_thread()->loop()
+ensure_thread()->loop();
 ```
-
-通常应通过 [`ensure_thread()`](#11-thread--ensure_thread) / `object::loop()` 获取 loop，不必直接调用 `ensure_thread_loop`。
 
 ### 10.4 示例
 
 ```cpp
 using namespace std::chrono_literals;
 
-event_loop* loop = ensure_thread()->loop();  // 或 ensure_thread_loop()
+event_loop* loop = ensure_thread()->loop();
 
 loop->post([] { std::cout << "task\n"; });
 
@@ -630,7 +632,7 @@ loop->process_events(100ms);
 loop->cancel_timer(id);
 ```
 
-工作线程上通常由 `worker_thread` 调用 `run()`，不必手写。
+工作线程上通常由 `worker_thread::start()` 泵送，不必手写 `run()`。
 
 > **`process_events()` 的适用场景**：测试、同步等待一批任务完成、或在没有完整事件循环的情况下手动排空队列。不适合长期运行的工作线程。
 
@@ -639,18 +641,20 @@ loop->cancel_timer(id);
 ## 11. thread / ensure_thread
 
 > **线程亲和句柄**（仿 `QThread` / `QThread::currentThread()`）。  
-> `object` 只持有 `thread*`；`event_loop` 仅作投递实现。
+> `object` 只持有 `thread*`；`event_loop` 仅作投递实现。  
+> **不要用 `event_loop*` 做亲和。**
 
 | 类型 / API | 说明 |
 |------------|------|
-| `thread` | 抽象基类：`loop()` / `is_running()` / `identity()` |
-| `current_thread` | 当前 OS 线程句柄（不 spawn），**拥有**本线程默认 `event_loop` |
+| `thread` | 抽象基类：`start()` / `stop()` / `loop_shared()` / `loop()` / `is_running()` / `identity()` |
+| `current_thread` | 当前 OS 线程句柄（不 spawn），**拥有**本线程 `event_loop`；`start()` 在本线程阻塞泵 |
+| `worker_thread` | 继承 `thread`；`start()` 创建新线程并泵 loop |
 | `thread* ensure_thread()` | 当前线程句柄；worker 线程内指向该 `worker_thread` |
-| `event_loop* ensure_thread_loop()` | 薄包装：`ensure_thread()->loop()`（兼容旧代码） |
 
 ```cpp
 thread* t = ensure_thread();          // 主线程：TLS current_thread
 event_loop* loop = t->loop();         // current_thread 拥有的默认 loop
+// t->start();                        // 本线程阻塞泵，直到 t->stop()
 
 worker_thread worker;
 worker.start();
@@ -674,7 +678,7 @@ public:
     core_application();           // ensure_thread()
     thread* thread() const;
     event_loop* loop() const;
-    int exec();                   // loop->run()，返回 0
+    int exec();                   // thread->start()，返回 0
 };
 ```
 
@@ -687,21 +691,22 @@ int main() {
 }
 ```
 
-即使不 `exec()`，只要构造过 `core_application`（或任意 `object` 触发了 `ensure_thread`），主线程也有默认亲和，可供 Direct / 同线程逻辑使用。跨线程 Queued 仍需要目标侧有人 `run`/`process_events`。
+即使不 `exec()`，只要构造过 `core_application`（或任意 `object` 触发了 `ensure_thread`），主线程也有默认亲和，可供 Direct / 同线程逻辑使用。跨线程 Queued 仍需要目标侧有人 `start`/`process_events`。
 
 ---
 
 ## 13. worker_thread
 
 > **后台线程的标准方式。**  
-> 继承 `thread`：创建 `event_loop`、在新线程 `run()`、将该 worker 注册为该 OS 线程的 `ensure_thread()`。
+> 继承 `thread`，**override** `start`/`stop`：创建 `event_loop`、在新线程 `run()`、将该 worker 注册为该 OS 线程的 `ensure_thread()`。
 
 | API | 说明 |
 |-----|------|
-| `void start()` | 创建 loop 并在新线程 `run()` |
-| `void stop()` | `stop` loop 并 `join`。**禁止在工作线程内调用**（assert 硬失败） |
-| `event_loop* loop() const` | 未 start / 已 stop 时为 `nullptr` |
-| `bool is_running() const` | |
+| `void start() override` | 创建 loop 并在**新线程** `run()` |
+| `void stop() override` | `stop` loop 并 `join`。**禁止在工作线程内调用**（assert 硬失败） |
+| `std::shared_ptr<event_loop> loop_shared() const override` | 未 start / 已 stop 时为空 |
+| `event_loop* loop() const` | `loop_shared().get()` |
+| `bool is_running() const override` | |
 | `identity()` | 继承自 `thread` |
 
 ```cpp
@@ -720,7 +725,7 @@ btn.clicked.emit();
 worker.stop();
 ```
 
-**Tip：** `object` 亲和持有的是 `thread*`（常为 `worker_thread*`），不是某次 `start` 的裸 `event_loop*`。
+**Tip：** `object` 亲和持有的是 `thread*`（常为 `worker_thread*`），不是某次 `start` 的裸 `event_loop*`。同线程判断比较 `object::thread()` 与 `ensure_thread()`。
 
 ---
 
@@ -755,7 +760,7 @@ connect(btn.clicked, win, &Window::onClicked);
 ### 14.2 delete_later 规则摘要
 
 - 无亲和 loop：立即 `delete this`。
-- 正在泵目标 loop，或调用方不在亲和线程：`post` 到目标再删。
+- 正在泵目标 loop，或调用方不在亲和线程：`post` 到目标再删；**post 失败则立即 `delete`**，避免泄漏。
 - 亲和线程且当前未在泵：立即 `delete`（避免无 `exec` 时泄漏）。
 
 ---
@@ -765,12 +770,15 @@ connect(btn.clicked, win, &Window::onClicked);
 1. **不要直接使用 `event_loop`**：请用 `core_application` / `ensure_thread`（主线程）、继承 `object` 或 `worker_thread`（后台）代替。
 2. **跨线程销毁**：先停相关 `worker_thread` / 排空队列，或依赖 `delete_later`。
 3. **派生析构第一行 `invalidate()`**。
-4. **BlockingQueued**：目标须 `run`；勿在正在泵的同一 loop 上对自己 `post_blocking` / `blocking_queued`。
-5. **禁止在工作线程内 `worker_thread::stop()`**。
-6. 主线程建议先构造 `core_application`。
-7. 堆对象优先 `object_uptr` / `object_sptr`；`connect` 不延长寿命。
-8. 跨线程 Direct 连接会降级为 Queued；无 loop 的 Queued/Blocking 会丢弃或失败。
-9. **亲和只绑 `utils::thread*`**：`object::thread()` 返回句柄，`object::loop()` 用于投递。`stop` 后 Queued emit 安全跳过，再 `start` 自动绑新 loop。
+4. **BlockingQueued / `post_blocking`**：目标须**正在泵**（`is_pumping()`），不是仅 `is_running()`（接受 post）。  
+   - **合法**：其他线程 → 正在 `run`/`exec` 的目标 loop。  
+   - **非法 / 立即失败**：当前线程对本 loop 再 `post_blocking`（自死锁）；或目标空闲未泵（例如主线程未 `exec`）——避免永久挂起。  
+5. **跨线程且无 loop**（如 `worker.stop()` 后）：Queued / Auto / Direct 均**跳过**，不会在发射线程直接调槽。  
+6. **禁止在工作线程内 `worker_thread::stop()`**。  
+7. 主线程建议先构造 `core_application`；需要 BlockingQueued 回主线程时主线程须在 `exec`/`process_events`。  
+8. 堆对象优先 `object_uptr` / `object_sptr`；`connect` 不延长寿命。  
+9. **亲和只绑 `utils::thread*`**：同线程判断比较 `object::thread()` 与 `ensure_thread()`；`object::loop()` 仅用于投递。  
+10. Queued 槽抛异常会被事件循环吞掉，后续任务仍可执行。
 
 ---
 
