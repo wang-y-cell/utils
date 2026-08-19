@@ -45,7 +45,7 @@ add_executable(utils_tests ${UTILS_TEST_SOURCES})
 target_link_libraries(utils_tests PRIVATE utils::utils GTest::gtest_main)
 gtest_discover_tests(utils_tests DISCOVERY_MODE PRE_TEST)
 
-# ---- demos (按四主题分组) ----
+# ---- demos（按主题分组）----
 utils_add_exe(demo_expected      demo/reliability/result/expected_demo.cpp)
 utils_add_exe(demo_retry         demo/reliability/retry/demo.cpp)
 utils_add_exe(demo_deadline      demo/reliability/time/demo.cpp)
@@ -54,9 +54,6 @@ utils_add_exe(demo_thread_pool   demo/concurrency/thread_pool/demo.cpp)
 utils_add_exe(demo_signal        demo/concurrency/signal_and_slots/sample.cpp)
 utils_add_exe(demo_channel       demo/concurrency/channel/demo.cpp)
 utils_add_exe(demo_memory        demo/memory/demo.cpp)
-utils_add_exe(demo_log           demo/facade/log/demo.cpp)
-utils_add_exe(demo_sql           demo/facade/sql/demo.cpp)
-utils_add_exe(demo_json          demo/facade/json/demo.cpp)
 
 add_custom_target(demos DEPENDS
   demo_expected
@@ -67,9 +64,6 @@ add_custom_target(demos DEPENDS
   demo_signal
   demo_channel
   demo_memory
-  demo_log
-  demo_sql
-  demo_json
 )
 
 # ---- install (header-only package) ----
@@ -85,7 +79,6 @@ install(DIRECTORY
   concurrency
   reliability
   memory
-  facade
   utils
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING PATTERN "*.h"

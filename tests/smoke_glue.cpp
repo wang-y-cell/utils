@@ -1,5 +1,4 @@
 #include "concurrency/executor/adapters.h"
-#include "facade/facade.h"
 #include "memory/memory.h"
 #include "utils/utils.h"
 
@@ -135,32 +134,6 @@ TEST(Glue, Channel) {
     }
     producer.join();
     EXPECT_EQ(sum, 2 + 3 + 10 + 11 + 12 + 13 + 14);
-}
-
-TEST(Glue, LogAndJsonFacades) {
-    log::set_backend(std::make_shared<log::null_backend>());
-    log::set_level(log::level::info);
-    log::info("smoke port={}", 8080);
-    log::set_backend(std::make_shared<log::stream_backend>());
-
-    auto doc = json::parse(R"({"db":{"host":"localhost"}})");
-    ASSERT_TRUE(doc);
-    auto host = doc->get("db.host");
-    ASSERT_TRUE(host);
-    EXPECT_EQ(host->as_string().value(), "localhost");
-}
-
-TEST(Glue, Sql) {
-    sql::memory_db db;
-    db.on_query("SELECT 1", sql::result_set{{"n"}, {{std::string{"1"}}}});
-    auto conn = db.open();
-    ASSERT_TRUE(conn);
-    auto q = conn.value()->query("SELECT 1");
-    ASSERT_TRUE(q);
-    EXPECT_EQ(q->rows.size(), 1u);
-    EXPECT_TRUE(conn.value()->begin());
-    EXPECT_TRUE(conn.value()->in_transaction());
-    EXPECT_TRUE(conn.value()->commit());
 }
 
 TEST(Glue, Memory) {

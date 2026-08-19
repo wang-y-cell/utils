@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * utils 伞头 — 四主题一键引入
+ * utils 伞头 — 三主题一键引入
  *
  *   #include "utils/utils.h"
  *
@@ -9,7 +9,6 @@
  *   concurrency/  — 并发与事件（signal、thread_pool、channel、executor）
  *   reliability/  — 可靠性与错误（result、retry、deadline）
  *   memory/       — 内存管理（memory_pool、object_pool）
- *   facade/       — 第三方能力窄门面（log、sql、json）
  *
  * 按需另含：
  *   #include "concurrency/concurrency.h"          // 仅并发主题
@@ -20,6 +19,5 @@
  */
 
 #include "concurrency/concurrency.h"
-#include "facade/facade.h"
 #include "memory/memory.h"
 #include "reliability/reliability.h"
