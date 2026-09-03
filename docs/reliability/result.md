@@ -45,7 +45,7 @@ cmake --build build --target demo_expected
 
 三条硬规则：
 
-1. **业务失败请 `return result_err(...)` / `unexpected`**，不要靠 throw 当日常分支。
+1. **业务失败请 `return err(...)` / `unexpected`**，不要靠 throw 当日常分支。
 2. **日常取值用 `if (r) { use(*r); }`**；`value()` 只在「无值就是编程错误」时用（会抛）。
 3. **本仓库业务优先 `result<T>`**（`E = std::error_code`），与 `retry` 等一致。
 
@@ -53,9 +53,9 @@ cmake --build build --target demo_expected
 
 | 你想… | 用 |
 |------|----|
-| 成功带值 | `return result_ok(x);` |
-| 失败 | `return result_err(std::errc::...);` |
-| 无载荷成功/失败 | `result<void>` + `result_ok()` / `result_err` |
+| 成功带值 | `return x;`（函数返回 `result<T>`） |
+| 失败 | `return err(std::errc::...);` |
+| 无载荷成功/失败 | `result<void>` + `return {}` / `err` |
 | 成功继续算 | `and_then` / `transform` |
 | 失败兜底 | `or_else` / `value_or` |
 
@@ -78,9 +78,9 @@ cmake --build build --target demo_expected
 
 | 操作 | 怎么写 | 说明 |
 |------|--------|------|
-| 成功（result） | `result_ok(42)` / `result_ok()` | 有值 / void |
-| 失败（result） | `result_err(std::errc::io_error)` | 得到 `unexpected`，赋给 `result` |
-| 通用成功 | `ok(1)` / `ok()` | 默认 `E = error_code` |
+| 成功（result） | `return 42` / `return {}` | 有值 / void；返回类型决定 `E` |
+| 失败（result） | `err(std::errc::io_error)` | 得到 `unexpected`，赋给 `result` |
+| 显式构造成功 | `result<int>{42}` / `expected<T,E>(std::in_place, ...)` | 无返回类型上下文时 |
 | 通用失败包装 | `err(e)` / `unexpected(e)` | |
 | 标签构造 | `expected<T,E>(unexpect, ...)` | 原位造错误 |
 
@@ -112,7 +112,7 @@ cmake --build build --target demo_expected
 
 | 异常操作 | 后果 | 正确做法 |
 |----------|------|----------|
-| 用 throw 表达「参数不对 / 找不到」 | 异常当控制流，难组合 | `return result_err(...)` |
+| 用 throw 表达「参数不对 / 找不到」 | 异常当控制流，难组合 | `return err(...)` |
 | 未检查就 `*r` / `r->` | UB / 读错侧 | 先 `if (r)` |
 | 成功态调 `error()` | assert / 未定义行为预期 | 仅失败时调 |
 | 把 `value()` 当日常 API | 失败就抛，难测难链 | 优先 `if` + `*` / `value_or` |
@@ -120,9 +120,9 @@ cmake --build build --target demo_expected
 
 ### 3.2 Tips
 
-**Tip 1 — `result_err` 本身不是完整 `result`**
+**Tip 1 — `err` 本身不是完整 `result`**
 
-- 它返回 `unexpected`；写成 `result<int> r = result_err(...);` 才成为失败态。
+- 它返回 `unexpected`；写成 `result<int> r = err(...);` 才成为失败态。
 
 **Tip 2 — 链式会短路**
 
@@ -147,9 +147,9 @@ cmake --build build --target demo_expected
 using namespace utils;
 
 result<int> parse_positive(std::string_view s) {
-    if (s.empty()) return result_err(std::errc::invalid_argument);
+    if (s.empty()) return err(std::errc::invalid_argument);
     // ...
-    return result_ok(42);
+    return 42;
 }
 
 int main() {
@@ -164,22 +164,22 @@ int main() {
 
 ---
 
-## 5. 教程 B：工厂与 void 结果
+## 5. 教程 B：构造与 void 结果
 
 ```cpp
-result<int> a = result_ok(1);
-result<int> b = result_err(std::errc::timed_out);
-result<void> save_ok = result_ok();
-result<void> save_bad = result_err(std::errc::io_error);
+result<int> a = 1;
+result<int> b = err(std::errc::timed_out);
+result<void> save_ok{};
+result<void> save_bad = err(std::errc::io_error);
 
-auto x = ok(1);     // expected<int, error_code>
-auto y = ok();      // expected<void, error_code>
+auto x = result<int>{1};
+auto y = result<void>{};
 ```
 
 决策：
 
 ```text
-业务错误通道？ → 优先 result<T> + result_ok / result_err
+业务错误通道？ → 优先 result<T> + return 值 / err
 需要自定义 E？ → expected<T, E> + unexpected
 ```
 
@@ -189,11 +189,11 @@ auto y = ok();      // expected<void, error_code>
 
 ```cpp
 auto doubled = parse_positive("21").and_then([](int n) -> result<int> {
-    if (n > 100) return result_err(std::errc::value_too_large);
-    return result_ok(n * 2);
+    if (n > 100) return err(std::errc::value_too_large);
+    return n * 2;
 });
 
-auto plus_one = result_ok(41).transform([](int n) { return n + 1; });
+auto plus_one = result<int>{41}.transform([](int n) { return n + 1; });
 ```
 
 - `and_then`：下一步还可能失败 → 回调返回 `result`/`expected`。
@@ -204,9 +204,9 @@ auto plus_one = result_ok(41).transform([](int n) { return n + 1; });
 ## 7. 教程 D：or_else / transform_error 兜底
 
 ```cpp
-auto r = result<int>(result_err(std::errc::io_error)).or_else(
+auto r = result<int>(err(std::errc::io_error)).or_else(
     [](const std::error_code&) -> result<int> {
-        return result_ok(0);  // 降级默认值
+        return 0;  // 降级默认值
     });
 
 expected<int, int> with_code(unexpect, 7);
@@ -235,7 +235,7 @@ expected<std::string, std::string> load_name(bool ok_flag) {
 
 | 我想… | 步骤 |
 |------|------|
-| 解析/校验返回 | A：`result_ok` / `result_err` + `if (r)` |
+| 解析/校验返回 | A：`return` 值 / `err` + `if (r)` |
 | 只表示成败无载荷 | B：`result<void>` |
 | 多步流水线 | C：`and_then` / `transform` |
 | 失败给默认 / 改错误形态 | D：`or_else` / `value_or` / `transform_error` |

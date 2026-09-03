@@ -1452,36 +1452,36 @@ private:
 		static_assert(std::is_base_of_v<object, Recv>,
 			"receiver must derive from utils::object");
 		if (!receiver || !method)
-			return result_err(std::errc::invalid_argument);
+			return err(std::errc::invalid_argument);
 
 		object *obj = static_cast<object *>(receiver);
 		const invoke_route route = resolve_invoke_route(obj, type);
 		if (route.failed())
-			return result_err(route.error);
+			return err(route.error);
 
 		auto call = [&]() -> result<R> {
 			auto gate = obj->lifetime().lock();
 			if (!gate || !obj->is_valid()) {
-				return result_err(std::errc::owner_dead);
+				return err(std::errc::owner_dead);
 			}
 			if constexpr (std::is_void_v<R>) {
 				(receiver->*method)(std::forward<Args>(args)...);
-				return result_ok();
+				return {};
 			} else {
-				return result_ok((receiver->*method)(std::forward<Args>(args)...).get());
+				return (receiver->*method)(std::forward<Args>(args)...).get();
 			}
 		};
 
 		if (route.use_direct)
 			return call();
 		if (!route.use_blocking)
-			return result_err(std::errc::operation_in_progress);
+			return err(std::errc::operation_in_progress);
 
 		auto loop_ = obj->loop_shared();
 		if (!loop_)
-			return result_err(std::errc::operation_not_permitted);
+			return err(std::errc::operation_not_permitted);
 		auto out =
-			std::make_shared<result<R>>(result_err(std::errc::operation_canceled));
+			std::make_shared<result<R>>(err(std::errc::operation_canceled));
 		std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
 		auto weak = obj->lifetime();
 		const bool posted = loop_->post_blocking([receiver, method,
@@ -1489,7 +1489,7 @@ private:
 			weak, obj, out]() mutable {
 			auto gate = weak.lock();
 			if (!gate || !obj->is_valid()) {
-				*out = result<R>(result_err(std::errc::owner_dead));
+				*out = result<R>(err(std::errc::owner_dead));
 				return;
 			}
 			if constexpr (std::is_void_v<R>) {
@@ -1498,17 +1498,17 @@ private:
 					(receiver->*method)(std::forward<decltype(a)>(a)...);
 				},
 					std::move(bound_args));
-				*out = result_ok();
+				*out = result<R>{};
 			} else {
-				*out = result_ok(std::apply(
+				*out = std::apply(
 					[&](auto &&...a) {
 					return (receiver->*method)(std::forward<decltype(a)>(a)...).get();
 				},
-					std::move(bound_args)));
+					std::move(bound_args));
 			}
 		});
 		if (!posted)
-			return result_err(std::errc::operation_not_permitted);
+			return err(std::errc::operation_not_permitted);
 		return std::move(*out);
 	}
 
@@ -1522,37 +1522,37 @@ private:
 		Args &&...args) {
 		using R = invoke_callable_result_t<F, Args...>;
 		if (!receiver)
-			return result_err(std::errc::invalid_argument);
+			return err(std::errc::invalid_argument);
 
 		const invoke_route route = resolve_invoke_route(receiver, type);
 		if (route.failed())
-			return result_err(route.error);
+			return err(route.error);
 
 		auto fn_store = std::decay_t<F>(std::forward<F>(fn));
 
 		auto call = [&]() -> result<R> {
 			auto gate = receiver->lifetime().lock();
 			if (!gate || !receiver->is_valid()) {
-				return result_err(std::errc::owner_dead);
+				return err(std::errc::owner_dead);
 			}
 			if constexpr (std::is_void_v<R>) {
 				std::invoke(fn_store, std::forward<Args>(args)...);
-				return result_ok();
+				return {};
 			} else {
-				return result_ok(std::invoke(fn_store, std::forward<Args>(args)...));
+				return std::invoke(fn_store, std::forward<Args>(args)...);
 			}
 		};
 
 		if (route.use_direct)
 			return call();
 		if (!route.use_blocking)
-			return result_err(std::errc::operation_in_progress);
+			return err(std::errc::operation_in_progress);
 
 		auto loop_ = receiver->loop_shared();
 		if (!loop_)
-			return result_err(std::errc::operation_not_permitted);
+			return err(std::errc::operation_not_permitted);
 		auto out =
-			std::make_shared<result<R>>(result_err(std::errc::operation_canceled));
+			std::make_shared<result<R>>(err(std::errc::operation_canceled));
 		std::tuple<std::decay_t<Args>...> bound_args{std::forward<Args>(args)...};
 		auto weak = receiver->lifetime();
 		const bool posted = loop_->post_blocking([fn_store = std::move(fn_store),
@@ -1560,7 +1560,7 @@ private:
 			weak, receiver, out]() mutable {
 			auto gate = weak.lock();
 			if (!gate || !receiver->is_valid()) {
-				*out = result<R>(result_err(std::errc::owner_dead));
+				*out = result<R>(err(std::errc::owner_dead));
 				return;
 			}
 			if constexpr (std::is_void_v<R>) {
@@ -1569,17 +1569,17 @@ private:
 					std::invoke(fn_store, std::forward<decltype(a)>(a)...);
 				},
 					std::move(bound_args));
-				*out = result_ok();
+				*out = result<R>{};
 			} else {
-				*out = result_ok(std::apply(
+				*out = std::apply(
 					[&](auto &&...a) {
 					return std::invoke(fn_store, std::forward<decltype(a)>(a)...);
 				},
-					std::move(bound_args)));
+					std::move(bound_args));
 			}
 		});
 		if (!posted)
-			return result_err(std::errc::operation_not_permitted);
+			return err(std::errc::operation_not_permitted);
 		return std::move(*out);
 	}
 

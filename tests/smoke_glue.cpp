@@ -13,14 +13,14 @@
 using namespace utils;
 
 TEST(Glue, Expected) {
-    result<int> a = result_ok(21);
+    result<int> a = 21;
     auto b = a.transform([](int n) { return n * 2; });
     ASSERT_TRUE(b);
     EXPECT_EQ(*b, 42);
 
-    result<int> c = result_err(std::errc::invalid_argument);
+    result<int> c = err(std::errc::invalid_argument);
     auto d = c.or_else([](const std::error_code&) -> result<int> {
-        return result_ok(7);
+        return 7;
     });
     ASSERT_TRUE(d);
     EXPECT_EQ(*d, 7);
@@ -32,7 +32,7 @@ TEST(Glue, Expected) {
     EXPECT_EQ(bad.error(), 3);
 
     auto chained =
-        result_ok(2).and_then([](int n) -> result<int> { return result_ok(n + 1); });
+        result<int>{2}.and_then([](int n) -> result<int> { return n + 1; });
     EXPECT_EQ(chained.value_or(0), 3);
 }
 
@@ -87,9 +87,9 @@ TEST(Glue, Retry) {
         [&]() -> result<int> {
             ++calls;
             if (calls < 3) {
-                return result_err(std::errc::connection_reset);
+                return err(std::errc::connection_reset);
             }
-            return result_ok(42);
+            return 42;
         },
         retry_policy::fixed(5, std::chrono::milliseconds(1)));
     ASSERT_TRUE(r);
@@ -100,7 +100,7 @@ TEST(Glue, Retry) {
     auto fail = retry(
         [&]() -> result<int> {
             ++calls;
-            return result_err(std::errc::invalid_argument);
+            return err(std::errc::invalid_argument);
         },
         retry_policy::fixed(3, std::chrono::milliseconds(1)),
         [](const std::error_code& ec) {

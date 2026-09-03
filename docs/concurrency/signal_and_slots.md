@@ -596,4 +596,4 @@ loop->cancel_timer(id);
 - 实现：`concurrency/signal_and_slots/signal_and_slots.h`
 - 示例：`demo/concurrency/signal_and_slots/sample.cpp`
 - 测试：`tests/signal_and_slots_test.cpp`
-- 错误类型：`reliability/result/expected.h`（`result` / `result_ok` / `result_err`）
+- 错误类型：`reliability/result/expected.h`（`result` / `err`）

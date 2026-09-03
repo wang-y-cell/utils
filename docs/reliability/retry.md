@@ -48,7 +48,7 @@ retry(op, policy [, should_retry] [, token] [, deadline])
 
 三条硬规则：
 
-1. **`op` 必须返回 `expected` / `result`**；业务失败用 `result_err`，不要靠异常做重试控制流。
+1. **`op` 必须返回 `expected` / `result`**；业务失败用 `err`，不要靠异常做重试控制流。
 2. **`retry` 在当前线程同步循环**；不会自己开线程。
 3. **请保证 `op` 幂等或可安全重复**（否则重试会放大副作用）。
 
@@ -99,7 +99,7 @@ retry(op, policy, should_retry, token, deadline);
 
 | 异常操作 | 后果 | 正确做法 |
 |----------|------|----------|
-| `op` 抛异常当失败 | 异常冒出，retry 接不住 | `op` 返回 `result_err` |
+| `op` 抛异常当失败 | 异常冒出，retry 接不住 | `op` 返回 `err` |
 | 非幂等写操作直接 retry | 重复下单 / 重复写入 | 只对可安全重试的调用用；或谓词过滤 |
 | 以为 retry 会异步跑 | 调用线程被 sleep 堵住 | 要异步请自己 `post` 到线程池 |
 | 错误类型无法构造 canceled | 取消路径编译不过 / 难返回 | 优先 `result`（`error_code`） |
@@ -138,8 +138,8 @@ int calls = 0;
 auto ok = retry(
     [&]() -> result<int> {
         ++calls;
-        if (calls < 3) return result_err(std::errc::connection_reset);
-        return result_ok(100);
+        if (calls < 3) return err(std::errc::connection_reset);
+        return 100;
     },
     retry_policy::exponential(5, 5ms));
 ```
@@ -179,7 +179,7 @@ std::stop_source source;
 source.request_stop();
 
 auto canceled = retry(
-    []() -> result<int> { return result_ok(1); },
+    []() -> result<int> { return 1; },
     retry_policy::fixed(3, 1ms),
     source.get_token());
 // canceled 多为 operation_canceled（若尚无上次失败）

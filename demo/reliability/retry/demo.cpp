@@ -5,7 +5,7 @@
  * 要点:
  * - retry_policy::fixed / exponential 只描述策略
  * - retry(op, policy [, should_retry] [, stop_token] [, deadline])
- * - op 必须返回 expected/result；业务失败用 result_err，不要靠异常做控制流
+ * - op 必须返回 expected/result；业务失败用 err(...)，不要靠异常做控制流
  * - 取消请直接用 std::stop_token / std::stop_source
  */
 
@@ -27,9 +27,9 @@ int main() {
             ++calls;
             std::cout << "  attempt #" << calls << '\n';
             if (calls < 3) {
-                return result_err(std::errc::connection_reset);
+                return err(std::errc::connection_reset);
             }
-            return result_ok(100);
+            return 100;
         },
         retry_policy::exponential(5, 5ms));
     std::cout << "  value=" << ok.value_or(-1) << " calls=" << calls << '\n';
@@ -39,7 +39,7 @@ int main() {
     auto fail = retry(
         [&]() -> result<int> {
             ++calls;
-            return result_err(std::errc::invalid_argument);
+            return err(std::errc::invalid_argument);
         },
         retry_policy::fixed(5, 1ms),
         [](const std::error_code& ec) {
@@ -52,7 +52,7 @@ int main() {
     std::stop_source source;
     source.request_stop();
     auto canceled = retry(
-        []() -> result<int> { return result_ok(1); },
+        []() -> result<int> { return 1; },
         retry_policy::fixed(3, 1ms), source.get_token());
     std::cout << "  canceled err="
               << (canceled ? "none" : canceled.error().message()) << '\n';

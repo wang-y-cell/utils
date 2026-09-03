@@ -1,17 +1,18 @@
 #pragma once
 
 /**
- * expected<T, E> / result<T> — 错误传递，少用异常当控制流（C++20 header-only）
+ * expected<T, E> / result<T, E = error_code> — 错误传递，少用异常当控制流（C++20 header-only）
  *
  * 详细可运行教程：demo/reliability/result/expected_demo.cpp
  *   cmake --build build --target demo_expected
  *
  * 速览：
- *   result<int> r = result_ok(42);
+ *   result<int> r = 42;
+ *   result<int, MyErr> s = 42;
  *   if (!r) { use(r.error()); } else { use(*r); }
- *   auto x = parse().and_then([](int n) -> result<int> { return result_ok(n * 2); });
+ *   auto x = parse().and_then([](int n) -> result<int> { return n * 2; });
  *
- * 业务失败请 return result_err / unexpected，不要用异常当控制流。
+ * 业务失败请 return err(...) / unexpected，不要用异常当控制流。
  * value() 在无值时抛 bad_expected_access，仅作未检查访问的兜底。
  *
  * 结构概览：
@@ -19,7 +20,7 @@
  *   detail::expected_storage — expected<T,E> 底层：二选一存 T 或 E
  *   detail::expected_void_storage — expected<void,E> 底层：成功无载荷
  *   expected<T,E> / expected<void,E> — 对外 API
- *   ok / err / result / result_ok / result_err — 工厂与别名
+ *   err / result — 工厂与别名
  */
 
 #include <cassert>
@@ -937,23 +938,6 @@ private:
 // ---------------------------------------------------------------------------
 
 /**
- * @brief 构造成功的 expected<decay_t<T>, E>
- * @param value 成功值
- */
-template <class T, class E = std::error_code>
-[[nodiscard]] expected<std::decay_t<T>, E> ok(T&& value) {
-    return expected<std::decay_t<T>, E>(std::in_place, std::forward<T>(value));
-}
-
-/**
- * @brief 构造成功的 expected<void, E>（无载荷）
- */
-template <class E = std::error_code>
-[[nodiscard]] expected<void, E> ok() {
-    return expected<void, E>(std::in_place);
-}
-
-/**
  * @brief 构造 unexpected（再赋给 expected/result 即失败态）
  * @param e 错误对象
  */
@@ -962,37 +946,15 @@ template <class E>
     return unexpected(std::forward<E>(e));
 }
 
-/**
- * @brief 常用别名：错误类型固定为 std::error_code
- */
-template <class T>
-using result = expected<T, std::error_code>;
-
-/** @brief 成功的 result<void> */
-[[nodiscard]] inline result<void> result_ok() { return ok<>(); }
-
-/**
- * @brief 成功的 result<T>
- * @param value 成功值
- */
-template <class T>
-[[nodiscard]] inline result<std::decay_t<T>> result_ok(T&& value) {
-    return ok<T, std::error_code>(std::forward<T>(value));
-}
-
-/**
- * @brief 失败：从 std::error_code 构造 unexpected
- * @note 需赋给 result/expected 才成为完整失败结果，例如 result<int> r = result_err(ec);
- */
-[[nodiscard]] inline auto result_err(std::error_code ec) {
-    return unexpected(ec);
-}
-
-/**
- * @brief 失败：从 std::errc 转为 error_code 再包装
- */
-[[nodiscard]] inline auto result_err(std::errc code) {
+/** @brief 失败：从 std::errc 转为 error_code 再包装（默认 result<T> 路径） */
+[[nodiscard]] inline auto err(std::errc code) {
     return unexpected(std::make_error_code(code));
 }
+
+/**
+ * @brief 常用别名：默认错误类型为 std::error_code，也可写 result<T, MyErr>
+ */
+template <class T, class E = std::error_code>
+using result = expected<T, E>;
 
 }  // namespace utils

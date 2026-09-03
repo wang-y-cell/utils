@@ -36,9 +36,9 @@ TEST(Retry, SucceedsAfterTransientFailures) {
         [&]() -> utils::result<int> {
             ++calls;
             if (calls < 3) {
-                return utils::result_err(std::errc::connection_reset);
+                return utils::err(std::errc::connection_reset);
             }
-            return utils::result_ok(42);
+            return utils::result<int>{42};
         },
         utils::retry_policy::fixed(5, std::chrono::milliseconds(1)));
     ASSERT_TRUE(result);
@@ -51,7 +51,7 @@ TEST(Retry, PredicateStopsWithoutRetrying) {
     auto result = utils::retry(
         [&]() -> utils::result<int> {
             ++calls;
-            return utils::result_err(std::errc::invalid_argument);
+            return utils::err(std::errc::invalid_argument);
         },
         utils::retry_policy::fixed(4, std::chrono::milliseconds(1)),
         [](const std::error_code& ec) {
@@ -68,7 +68,7 @@ TEST(Retry, StopTokenCancelsBeforeFirstAttempt) {
     auto result = utils::retry(
         [&]() -> utils::result<int> {
             ++calls;
-            return utils::result_ok(1);
+            return 1;
         },
         utils::retry_policy::fixed(3, std::chrono::milliseconds(1)),
         source.get_token());
@@ -83,7 +83,7 @@ TEST(Retry, AlreadyExpiredDeadlineCancelsWithoutCalling) {
     auto result = utils::retry(
         [&]() -> utils::result<int> {
             ++calls;
-            return utils::result_ok(1);
+            return 1;
         },
         utils::retry_policy::fixed(3, std::chrono::milliseconds(1)), {},
         utils::deadline::at(utils::deadline::clock::now() -
