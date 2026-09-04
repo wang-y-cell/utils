@@ -70,6 +70,7 @@ cmake --build build --target demo_expected
 | `expected<T, E>` | 成功 `T` 或错误 `E` |
 | `expected<void, E>` | 成功无载荷 |
 | `result<T>` | `expected<T, std::error_code>` |
+| `error_info<Code>` | 枚举码 + 文案 + 源位置；`display()` |
 | `unexpected<E>` | 显式错误包装，消歧义 |
 | `unexpect` | 标签：`expected(unexpect, ...)` |
 | `bad_expected_access` | 对空值调 `value()` 时抛出 |
@@ -80,6 +81,7 @@ cmake --build build --target demo_expected
 |------|--------|------|
 | 成功（result） | `return 42` / `return {}` | 有值 / void；返回类型决定 `E` |
 | 失败（result） | `err(std::errc::io_error)` | 得到 `unexpected`，赋给 `result` |
+| 失败（error_info） | `err(MyCode::X)` / `err(MyCode::X, "msg")` | 单参文案为数值；均带源位置 |
 | 显式构造成功 | `result<int>{42}` / `expected<T,E>(std::in_place, ...)` | 无返回类型上下文时 |
 | 通用失败包装 | `err(e)` / `unexpected(e)` | |
 | 标签构造 | `expected<T,E>(unexpect, ...)` | 原位造错误 |
@@ -229,6 +231,27 @@ expected<std::string, std::string> load_name(bool ok_flag) {
 
 `T`/`E` 易混时务必 `unexpected`。
 
+### 8.1 枚举 + 文案 + 源位置（`error_info`）
+
+```cpp
+enum class ErrorCode { NotFound = 1, Invalid = 2 };
+
+template <class T>
+using rest = result<T, error_info<ErrorCode>>;
+
+rest<int> load() {
+    return err(ErrorCode::NotFound);              // message 默认为 "1"
+    // return err(ErrorCode::NotFound, "missing"); // 自定义文案
+}
+
+auto r = load();
+if (!r) std::cout << r.error().display();  // file:line in func: message
+```
+
+- 单参：`err(code)` → 文案为枚举底层数值，仍带文件/函数/行号  
+- 双参：`err(code, msg)` → 你的字符串 + 源位置  
+- `std::errc` 仍走原来的 `error_code` 路径，不受影响  
+
 ---
 
 ## 9. 场景速查
@@ -239,7 +262,7 @@ expected<std::string, std::string> load_name(bool ok_flag) {
 | 只表示成败无载荷 | B：`result<void>` |
 | 多步流水线 | C：`and_then` / `transform` |
 | 失败给默认 / 改错误形态 | D：`or_else` / `value_or` / `transform_error` |
-| 非 `error_code` 错误 | E：`expected<T, E>` |
+| 非 `error_code` 错误 | E：`expected<T, E>` / `error_info<Code>` |
 | 失败自动再试 | [retry.md](./retry.md) |
 
 ---

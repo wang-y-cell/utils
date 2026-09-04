@@ -100,3 +100,33 @@ TEST(Expected, CustomErrorType) {
     ASSERT_TRUE(chained);
     EXPECT_EQ(*chained, 3);
 }
+
+enum class TestErrorCode {
+    NotFound = 7,
+    Invalid = 8,
+};
+
+TEST(Expected, ErrorInfoSingleAndDualArg) {
+    using info = utils::error_info<TestErrorCode>;
+    utils::result<int, info> only_code = utils::err(TestErrorCode::NotFound);
+    ASSERT_FALSE(only_code);
+    EXPECT_EQ(only_code.error().code, TestErrorCode::NotFound);
+    EXPECT_EQ(only_code.error().message, "7");
+    const std::string shown = only_code.error().display();
+    EXPECT_NE(shown.find("7"), std::string::npos);
+    EXPECT_NE(shown.find(':'), std::string::npos);
+
+    utils::result<int, info> with_msg =
+        utils::err(TestErrorCode::Invalid, "bad arg");
+    ASSERT_FALSE(with_msg);
+    EXPECT_EQ(with_msg.error().code, TestErrorCode::Invalid);
+    EXPECT_EQ(with_msg.error().message, "bad arg");
+    EXPECT_NE(with_msg.error().display().find("bad arg"), std::string::npos);
+    EXPECT_NE(with_msg.error().where.line(), 0u);
+
+    // 传播时保留原 error_info（含位置）
+    utils::result<long, info> propagated = utils::err(with_msg.error());
+    ASSERT_FALSE(propagated);
+    EXPECT_EQ(propagated.error().message, "bad arg");
+    EXPECT_EQ(propagated.error().where.line(), with_msg.error().where.line());
+}

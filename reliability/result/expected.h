@@ -8,7 +8,7 @@
  *
  * 速览：
  *   result<int> r = 42;
- *   result<int, MyErr> s = 42;
+ *   result<int, error_info<MyCode>> s = err(MyCode::X, "msg");
  *   if (!r) { use(r.error()); } else { use(*r); }
  *   auto x = parse().and_then([](int n) -> result<int> { return n * 2; });
  *
@@ -17,6 +17,7 @@
  *
  * 结构概览：
  *   unexpected<E>           — 显式错误包装，避免与 T 构造歧义
+ *   error_info<Code>        — 枚举码 + 文案 + 源位置（display）
  *   detail::expected_storage — expected<T,E> 底层：二选一存 T 或 E
  *   detail::expected_void_storage — expected<void,E> 底层：成功无载荷
  *   expected<T,E> / expected<void,E> — 对外 API
@@ -27,6 +28,10 @@
 #include <exception>
 #include <functional>
 #include <new>
+#include <source_location>
+#include <string>
+#include <string_view>
+#include <format>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -91,7 +96,37 @@ unexpected(E) -> unexpected<E>;
 
 /** @note 常用写法 return unexpected(ec);（靠 CTAD，与 std::unexpected 一致） */
 
+/**
+ * @brief 业务错误载荷：错误码 + 文案 + 抛出点源位置
+ * @tparam Code 一般为 enum class；display() 格式为 "[file:line] in func: message"
+ * @note 单参 err(code) 时 message 默认为枚举底层数值字符串
+ */
+template <class Code>
+struct error_info {
+    static_assert(std::is_enum_v<Code>, "error_info requires an enum code type");
+    Code code{};
+    std::string message;
+    std::source_location where{};
+
+    /** @brief "[file:line] in function: message" */
+    [[nodiscard]] std::string display() const {
+        return std::format("[{}:{}] in [{}]: {}", where.file_name(), where.line(),
+                           where.function_name(), message);
+    }
+};
+
 namespace detail {
+
+template <class Code>
+inline constexpr bool is_error_info_code_v =
+    std::is_enum_v<std::decay_t<Code>> &&
+    !std::is_same_v<std::decay_t<Code>, std::errc>;
+
+template <class Code>
+[[nodiscard]] std::string default_error_message(Code code) {
+    using U = std::underlying_type_t<std::decay_t<Code>>;
+    return std::to_string(static_cast<U>(code));
+}
 
 /** @brief 类型特征：判断是否为 unexpected 特化 */
 template <class U>
@@ -939,11 +974,39 @@ private:
 
 /**
  * @brief 构造 unexpected（再赋给 expected/result 即失败态）
- * @param e 错误对象
+ * @param e 错误对象（如 error_info、error_code、自定义类型）
  */
-template <class E>
+template <class E,
+          std::enable_if_t<!detail::is_error_info_code_v<E>, int> = 0>
 [[nodiscard]] auto err(E&& e) {
     return unexpected(std::forward<E>(e));
+}
+
+/**
+ * @brief 枚举错误码 + 自定义文案，并记录调用点源位置
+ * @note 用于 result<T, error_info<Code>>；不含 std::errc（仍走 error_code 重载）
+ */
+template <class Code,
+          std::enable_if_t<detail::is_error_info_code_v<Code>, int> = 0>
+[[nodiscard]] auto err(
+    Code code, std::string_view message,
+    const std::source_location& loc = std::source_location::current()) {
+    using C = std::decay_t<Code>;
+    return unexpected(
+        error_info<C>{code, std::string(message), loc});
+}
+
+/**
+ * @brief 仅枚举错误码：文案默认为底层数值字符串，仍记录源位置
+ */
+template <class Code,
+          std::enable_if_t<detail::is_error_info_code_v<Code>, int> = 0>
+[[nodiscard]] auto err(
+    Code code,
+    const std::source_location& loc = std::source_location::current()) {
+    using C = std::decay_t<Code>;
+    return unexpected(
+        error_info<C>{code, detail::default_error_message(code), loc});
 }
 
 /** @brief 失败：从 std::errc 转为 error_code 再包装（默认 result<T> 路径） */
@@ -952,7 +1015,7 @@ template <class E>
 }
 
 /**
- * @brief 常用别名：默认错误类型为 std::error_code，也可写 result<T, MyErr>
+ * @brief 常用别名：默认错误类型为 std::error_code，也可写 result<T, error_info<MyCode>>
  */
 template <class T, class E = std::error_code>
 using result = expected<T, E>;

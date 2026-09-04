@@ -97,6 +97,13 @@ int main() {
               << " err=" << err(std::errc::broken_pipe).error().message()
               << '\n';
 
+    std::cout << "\n=== error_info ===\n";
+    enum class DemoCode { Missing = 3 };
+    result<int, error_info<DemoCode>> ei = err(DemoCode::Missing, "nope");
+    if (!ei) std::cout << ei.error().display() << '\n';
+    result<void, error_info<DemoCode>> ej = err(DemoCode::Missing);
+    if (!ej) std::cout << ej.error().display() << '\n';
+
     std::cout << "\nexpected_demo: ok\n";
     return 0;
 }
