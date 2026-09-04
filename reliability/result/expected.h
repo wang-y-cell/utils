@@ -22,6 +22,7 @@
  *   detail::expected_void_storage — expected<void,E> 底层：成功无载荷
  *   expected<T,E> / expected<void,E> — 对外 API
  *   err / result — 工厂与别名
+ *   Try(expr) / Try(var, expr) — 见 reliability/result/try.h
  */
 
 #include <cassert>

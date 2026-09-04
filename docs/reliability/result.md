@@ -82,6 +82,7 @@ cmake --build build --target demo_expected
 | 成功（result） | `return 42` / `return {}` | 有值 / void；返回类型决定 `E` |
 | 失败（result） | `err(std::errc::io_error)` | 得到 `unexpected`，赋给 `result` |
 | 失败（error_info） | `err(MyCode::X)` / `err(MyCode::X, "msg")` | 单参文案为数值；均带源位置 |
+| 早退宏 | `Try(expr)` / `Try(var, expr)`（`try.h`） | 表达式含逗号时加括号 |
 | 显式构造成功 | `result<int>{42}` / `expected<T,E>(std::in_place, ...)` | 无返回类型上下文时 |
 | 通用失败包装 | `err(e)` / `unexpected(e)` | |
 | 标签构造 | `expected<T,E>(unexpect, ...)` | 原位造错误 |

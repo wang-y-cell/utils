@@ -7,5 +7,6 @@
  */
 
 #include "reliability/result/expected.h"
+#include "reliability/result/try.h"
 #include "reliability/retry/retry.h"
 #include "reliability/time/deadline.h"

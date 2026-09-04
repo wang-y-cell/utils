@@ -1,4 +1,5 @@
 #include "reliability/result/expected.h"
+#include "reliability/result/try.h"
 
 #include <string>
 #include <system_error>
@@ -129,4 +130,53 @@ TEST(Expected, ErrorInfoSingleAndDualArg) {
     ASSERT_FALSE(propagated);
     EXPECT_EQ(propagated.error().message, "bad arg");
     EXPECT_EQ(propagated.error().where.line(), with_msg.error().where.line());
+}
+
+TEST(Expected, TryOneAndTwoArg) {
+    using info = utils::error_info<TestErrorCode>;
+
+    auto ok_void = []() -> utils::result<void, info> {
+        Try((utils::result<void, info>{}));
+        return {};
+    };
+    EXPECT_TRUE(ok_void());
+
+    auto fail_void = []() -> utils::result<void, info> {
+        utils::result<void, info> step =
+            utils::err(TestErrorCode::NotFound, "gone");
+        Try(step);
+        return {};
+    };
+    auto fv = fail_void();
+    ASSERT_FALSE(fv);
+    EXPECT_EQ(fv.error().message, "gone");
+
+    auto ok_value = []() -> utils::result<int, info> {
+        Try(n, (utils::result<int, info>{21}));
+        return n * 2;
+    };
+    auto ov = ok_value();
+    ASSERT_TRUE(ov);
+    EXPECT_EQ(*ov, 42);
+
+    auto fail_value = []() -> utils::result<int, info> {
+        utils::result<int, info> step =
+            utils::err(TestErrorCode::Invalid, "nope");
+        Try(n, step);
+        return n;
+    };
+    auto fv2 = fail_value();
+    ASSERT_FALSE(fv2);
+    EXPECT_EQ(fv2.error().code, TestErrorCode::Invalid);
+
+    auto propagate = []() -> utils::result<int, info> {
+        auto inner = []() -> utils::result<int, info> {
+            return utils::err(TestErrorCode::NotFound, "inner");
+        };
+        Try(v, inner());
+        return v;
+    };
+    auto p = propagate();
+    ASSERT_FALSE(p);
+    EXPECT_EQ(p.error().message, "inner");
 }
