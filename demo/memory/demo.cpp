@@ -15,4 +15,11 @@ int main() {
     utils::object_pool<std::string> strings(2);
     auto text = strings.acquire("pooled object");
     std::cout << *text << ", capacity=" << strings.capacity() << '\n';
+
+    utils::memory_allocator alloc;
+    void* small = alloc.allocate(48);
+    void* large = alloc.allocate(alloc.large_threshold() + 64);
+    alloc.deallocate(small);
+    alloc.deallocate(large);
+    std::cout << "memory_allocator: ok\n";
 }

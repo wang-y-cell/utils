@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <source_location>
 #include <type_traits>
 #include <utility>
 
@@ -13,6 +14,7 @@ namespace utils {
  * 固定类型对象池。
  *
  * object_pool 必须比由 create/acquire 创建的所有对象活得更久。
+ * 泄漏记录在底层 memory_pool（UTILS_POOL_LEAK_CHECK）。
  */
 template <class T>
 class object_pool {
@@ -43,7 +45,13 @@ public:
 
     template <class... Args>
     [[nodiscard]] T* create(Args&&... args) {
-        void* storage = storage_.allocate();
+        return create_at(std::source_location::current(),
+                         std::forward<Args>(args)...);
+    }
+
+    template <class... Args>
+    [[nodiscard]] T* create_at(std::source_location loc, Args&&... args) {
+        void* storage = storage_.allocate(loc);
         try {
             return std::construct_at(static_cast<T*>(storage),
                                      std::forward<Args>(args)...);
@@ -75,6 +83,12 @@ public:
         return pointer(create(std::forward<Args>(args)...), deleter{this});
     }
 
+    template <class... Args>
+    [[nodiscard]] pointer acquire_at(std::source_location loc, Args&&... args) {
+        return pointer(create_at(loc, std::forward<Args>(args)...),
+                       deleter{this});
+    }
+
     [[nodiscard]] std::size_t capacity() const noexcept {
         return storage_.capacity();
     }
@@ -86,6 +100,15 @@ public:
     [[nodiscard]] std::size_t in_use() const noexcept {
         return storage_.in_use();
     }
+
+    [[nodiscard]] memory_pool& storage() noexcept { return storage_; }
+    [[nodiscard]] const memory_pool& storage() const noexcept {
+        return storage_;
+    }
+
+#if UTILS_POOL_LEAK_CHECK >= 2
+    void dump_leaks() const { storage_.dump_leaks(); }
+#endif
 
 private:
     memory_pool storage_;
