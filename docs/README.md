@@ -4,7 +4,7 @@
 
 - `concurrency/`：signal_and_slots、thread_pool、channel、executor
 - `reliability/`：result、retry、deadline
-- `memory/`：memory_resource、memory_pool、memory_allocator、object_pool
+- `memory/`：memory_pool、memory_allocator、typed_alloc、object_pool
 
 对应主题伞头为 `concurrency/concurrency.h`、
 `reliability/reliability.h`、`memory/memory.h`。

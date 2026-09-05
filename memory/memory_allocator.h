@@ -1,26 +1,20 @@
 #pragma once
 
 /**
- * memory_allocator — 多池门面：可配置二级分段 size-class + large(raw new)，
- * 或手动 hint 指定 fixed / raw_new。
+ * memory_allocator — 无锁二级 size-class freelist（SGI 风格热路径）。
  *
- * 默认预设 balanced：
- *   ≤128      步长 8
- *   129～4096  步长 128
- *   > mid_max  raw ::operator new
+ * API：allocate(n) / deallocate(p, n) —— 归还必须带分配时的字节数（或同档上取整）。
+ * 线程安全由调用方保证。大于 mid_max 走 ::operator new。
  *
- * 也可用 size_class_preset / size_class_config 按业务调整步长。
+ * 泄漏档 UTILS_POOL_LEAK_CHECK：
+ *   0 — 热路径无记账（目标：接近 SGI）
+ *   1 — outstanding 计数；析构告警
+ *   2 — ptr→(bytes, source_location)；dump_leaks()
  */
 
-#include "memory/memory_pool.h"
-#include "memory/memory_resource.h"
-
-#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
-#include <memory>
-#include <mutex>
 #include <new>
 #include <source_location>
 #include <stdexcept>
@@ -28,13 +22,16 @@
 #include <utility>
 #include <vector>
 
+#ifndef UTILS_POOL_LEAK_CHECK
+#define UTILS_POOL_LEAK_CHECK 0
+#endif
+
 namespace utils {
 
-/** 开箱预设；细调请用 size_class_config */
 enum class size_class_preset {
-    balanced,     // 小步长 8 / 中步长 128（默认）
-    dense_small,  // 小段延伸到 256，小对象更密
-    compact,      // 档更少，省池实例
+    balanced,
+    dense_small,
+    compact,
 };
 
 struct size_class_config {
@@ -42,10 +39,10 @@ struct size_class_config {
     std::size_t small_max = 128;
     std::size_t mid_step = 128;
     std::size_t mid_max = 4096;
-    /** 0 表示使用 mid_max */
+    /** 0 → 使用 mid_max（最大池化档） */
     std::size_t large_threshold = 0;
-    std::size_t blocks_per_chunk = 64;
-    /** 防止步长过小导致档数爆炸 */
+    /** refill 时一次希望切出的块数（类似 SGI nobjs） */
+    std::size_t refill_objects = 20;
     std::size_t max_classes = 256;
 
     [[nodiscard]] static size_class_config from_preset(
@@ -64,7 +61,6 @@ struct size_class_config {
                 cfg.small_step = 16;
                 cfg.small_max = 128;
                 cfg.mid_step = 256;
-                // (mid_max - small_max) 须整除 mid_step；4224 = 128 + 16*256
                 cfg.mid_max = 4224;
                 break;
         }
@@ -76,8 +72,7 @@ namespace detail {
 
 inline void validate_size_class_config(const size_class_config& cfg) {
     if (cfg.small_step == 0 || cfg.mid_step == 0) {
-        throw std::invalid_argument(
-            "size_class_config: step must be > 0");
+        throw std::invalid_argument("size_class_config: step must be > 0");
     }
     if (cfg.small_max == 0 || cfg.mid_max == 0) {
         throw std::invalid_argument("size_class_config: max must be > 0");
@@ -95,20 +90,24 @@ inline void validate_size_class_config(const size_class_config& cfg) {
             "size_class_config: (mid_max - small_max) must be multiple of "
             "mid_step");
     }
-    if (cfg.blocks_per_chunk == 0) {
+    if (cfg.refill_objects == 0) {
         throw std::invalid_argument(
-            "size_class_config: blocks_per_chunk must be > 0");
+            "size_class_config: refill_objects must be > 0");
     }
     if (cfg.max_classes == 0) {
         throw std::invalid_argument(
             "size_class_config: max_classes must be > 0");
+    }
+    if ((cfg.small_step & (cfg.small_step - 1)) != 0 ||
+        (cfg.mid_step & (cfg.mid_step - 1)) != 0) {
+        throw std::invalid_argument(
+            "size_class_config: steps must be powers of two");
     }
 }
 
 inline std::vector<std::size_t> build_class_sizes(
     const size_class_config& cfg) {
     validate_size_class_config(cfg);
-
     std::vector<std::size_t> sizes;
     for (std::size_t s = cfg.small_step; s <= cfg.small_max;
          s += cfg.small_step) {
@@ -118,14 +117,9 @@ inline std::vector<std::size_t> build_class_sizes(
          s += cfg.mid_step) {
         sizes.push_back(s);
     }
-    if (sizes.empty()) {
+    if (sizes.empty() || sizes.size() > cfg.max_classes) {
         throw std::invalid_argument(
-            "size_class_config: produced empty class table");
-    }
-    if (sizes.size() > cfg.max_classes) {
-        throw std::invalid_argument(
-            "size_class_config: too many classes; increase steps or "
-            "max_classes");
+            "size_class_config: invalid class table size");
     }
     return sizes;
 }
@@ -134,14 +128,6 @@ inline std::vector<std::size_t> build_class_sizes(
 
 class memory_allocator {
 public:
-    struct stats {
-        std::size_t in_use_bytes = 0;
-        std::size_t alloc_count = 0;
-        std::size_t size_class_bytes = 0;
-        std::size_t raw_new_bytes = 0;
-        std::size_t fixed_hint_bytes = 0;
-    };
-
     memory_allocator()
         : memory_allocator(
               size_class_config::from_preset(size_class_preset::balanced)) {}
@@ -154,252 +140,363 @@ public:
           class_sizes_(detail::build_class_sizes(cfg)),
           large_threshold_(cfg.large_threshold == 0 ? class_sizes_.back()
                                                     : cfg.large_threshold),
-          blocks_per_chunk_(cfg.blocks_per_chunk) {
+          small_max_(cfg.small_max),
+          small_step_(cfg.small_step),
+          mid_step_(cfg.mid_step),
+          small_count_(cfg.small_max / cfg.small_step),
+          nclasses_(class_sizes_.size()) {
         if (large_threshold_ < class_sizes_.front()) {
             throw std::invalid_argument(
                 "memory_allocator: large_threshold too small");
         }
-        classes_.reserve(class_sizes_.size());
-        for (std::size_t sz : class_sizes_) {
-            classes_.push_back(std::make_unique<memory_pool>(
-                sz, blocks_per_chunk_, alignof(std::max_align_t)));
+        if (nclasses_ > kMaxClasses) {
+            throw std::invalid_argument(
+                "memory_allocator: too many size classes");
+        }
+        for (std::size_t i = 0; i < kMaxClasses; ++i) {
+            free_lists_[i] = nullptr;
         }
     }
 
-    /**
-     * 兼容旧构造：在 balanced 预设上覆盖 large_threshold / blocks_per_chunk。
-     */
-    explicit memory_allocator(std::size_t large_threshold,
-                              std::size_t blocks_per_chunk = 64)
-        : memory_allocator([&] {
-              auto cfg = size_class_config::from_preset(
-                  size_class_preset::balanced);
-              cfg.large_threshold = large_threshold;
-              cfg.blocks_per_chunk = blocks_per_chunk;
-              return cfg;
-          }()) {}
-
     ~memory_allocator() {
 #if UTILS_POOL_LEAK_CHECK >= 1
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!live_.empty()) {
+        if (outstanding_ != 0) {
             std::fprintf(stderr,
                          "memory_allocator: destroy with %zu allocation(s) "
-                         "still live (%zu bytes)\n",
-                         live_.size(), in_use_bytes_unlocked());
+                         "still live\n",
+                         outstanding_);
 #if UTILS_POOL_LEAK_CHECK >= 2
-            dump_leaks_to_unlocked(stderr);
-            const char* path = std::getenv("UTILS_POOL_LEAK_FILE");
-            if (path && *path) {
-                if (FILE* f = std::fopen(path, "a")) {
-                    dump_leaks_to_unlocked(f);
-                    std::fclose(f);
-                }
-            }
+            dump_leaks_to(stderr);
+            report_leaks_to_file();
 #endif
         }
 #endif
+        for (void* chunk : chunks_) {
+            std::free(chunk);
+        }
     }
 
     memory_allocator(const memory_allocator&) = delete;
     memory_allocator& operator=(const memory_allocator&) = delete;
 
-    [[nodiscard]] void* allocate(
-        std::size_t size, alloc_hint hint = {},
-        std::source_location loc = std::source_location::current()) {
-        if (size == 0) {
-            size = 1;
+    [[nodiscard]] void* allocate(std::size_t n
+#if UTILS_POOL_LEAK_CHECK >= 2
+                                 ,
+                                 std::source_location loc =
+                                     std::source_location::current()
+#endif
+    ) {
+        if (n == 0) {
+            n = 1;
         }
 
-        if (hint.kind == pool_kind::fixed) {
-            auto* pool = static_cast<memory_pool*>(hint.fixed_pool);
-            if (!pool) {
-                throw std::invalid_argument(
-                    "memory_allocator: fixed hint requires fixed_pool");
-            }
-            if (size > pool->block_size()) {
-                throw std::invalid_argument(
-                    "memory_allocator: size exceeds fixed pool block_size");
-            }
-            void* p = pool->allocate(loc);
-            track(p, live_entry{pool_kind::fixed, size, pool
+        if (n > large_threshold_) {
+            void* p = ::operator new(
+                n, std::align_val_t(alignof(std::max_align_t)));
+#if UTILS_POOL_LEAK_CHECK >= 1
+            track_alloc(p, n
 #if UTILS_POOL_LEAK_CHECK >= 2
-                                ,
-                                loc
+                        ,
+                        loc
 #endif
-            });
+            );
+#endif
             return p;
         }
 
-        const bool force_raw = hint.kind == pool_kind::raw_new ||
-                               hint.kind == pool_kind::large;
-        const bool too_large =
-            size > large_threshold_ || size > class_sizes_.back();
-        if (force_raw ||
-            (hint.kind == pool_kind::auto_select && too_large)) {
-            void* p =
-                ::operator new(size, std::align_val_t(alignof(std::max_align_t)));
-            track(p, live_entry{pool_kind::raw_new, size, nullptr
-#if UTILS_POOL_LEAK_CHECK >= 2
-                                ,
-                                loc
-#endif
-            });
-            return p;
+        std::size_t bytes;
+        std::size_t index;
+        if (n <= small_max_) {
+            bytes = (n + small_step_ - 1) & ~(small_step_ - 1);
+            index = (bytes / small_step_) - 1;
+        } else {
+            const std::size_t over = n - small_max_;
+            const std::size_t steps = (over + mid_step_ - 1) / mid_step_;
+            bytes = small_max_ + steps * mid_step_;
+            index = small_count_ + steps - 1;
         }
 
-        if (hint.kind == pool_kind::size_class && too_large) {
-            throw std::invalid_argument(
-                "memory_allocator: size exceeds size-class range");
-        }
-
-        const std::size_t index = class_index_for(size);
-        memory_pool* pool = classes_[index].get();
-        void* p = pool->allocate(loc);
-        track(p, live_entry{pool_kind::size_class, size, pool
+        free_node* result = free_lists_[index];
+        if (result) {
+            free_lists_[index] = result->next;
+#if UTILS_POOL_LEAK_CHECK >= 1
+            track_alloc(result, bytes
 #if UTILS_POOL_LEAK_CHECK >= 2
-                            ,
-                            loc
+                        ,
+                        loc
 #endif
-        });
+            );
+#endif
+            return result;
+        }
+        void* p = refill(bytes, index);
+#if UTILS_POOL_LEAK_CHECK >= 1
+        track_alloc(p, bytes
+#if UTILS_POOL_LEAK_CHECK >= 2
+                    ,
+                    loc
+#endif
+        );
+#endif
         return p;
     }
 
-    void deallocate(void* p) noexcept {
+    void deallocate(void* p, std::size_t n) noexcept {
         if (!p) {
             return;
         }
-        live_entry entry;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = live_.find(p);
-            if (it == live_.end()) {
-                return;
-            }
-            entry = it->second;
-            live_.erase(it);
+        if (n == 0) {
+            n = 1;
         }
-        if (entry.kind == pool_kind::raw_new) {
-            ::operator delete(p, std::align_val_t(alignof(std::max_align_t)));
-        } else if (entry.pool) {
-            entry.pool->deallocate(p);
-        }
-    }
 
-    [[nodiscard]] stats snapshot() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stats s;
-        s.alloc_count = live_.size();
-        for (const auto& [ptr, e] : live_) {
-            (void)ptr;
-            s.in_use_bytes += e.bytes;
-            switch (e.kind) {
-                case pool_kind::size_class:
-                    s.size_class_bytes += e.bytes;
-                    break;
-                case pool_kind::raw_new:
-                case pool_kind::large:
-                    s.raw_new_bytes += e.bytes;
-                    break;
-                case pool_kind::fixed:
-                    s.fixed_hint_bytes += e.bytes;
-                    break;
-                default:
-                    break;
-            }
+#if UTILS_POOL_LEAK_CHECK >= 1
+        track_dealloc(p);
+#endif
+
+        if (n > large_threshold_) {
+            ::operator delete(p, std::align_val_t(alignof(std::max_align_t)));
+            return;
         }
-        return s;
+
+        std::size_t bytes;
+        std::size_t index;
+        if (n <= small_max_) {
+            bytes = (n + small_step_ - 1) & ~(small_step_ - 1);
+            index = (bytes / small_step_) - 1;
+        } else {
+            const std::size_t over = n - small_max_;
+            const std::size_t steps = (over + mid_step_ - 1) / mid_step_;
+            bytes = small_max_ + steps * mid_step_;
+            index = small_count_ + steps - 1;
+        }
+
+        auto* q = static_cast<free_node*>(p);
+        q->next = free_lists_[index];
+        free_lists_[index] = q;
     }
 
     [[nodiscard]] std::size_t large_threshold() const noexcept {
         return large_threshold_;
     }
-
     [[nodiscard]] const size_class_config& config() const noexcept {
         return config_;
     }
-
     [[nodiscard]] const std::vector<std::size_t>& class_sizes()
         const noexcept {
         return class_sizes_;
     }
-
     [[nodiscard]] std::size_t size_class_count() const noexcept {
-        return class_sizes_.size();
+        return nclasses_;
     }
 
-    /** 请求 size 会上取整到的档大小；超出最大档返回 0 */
-    [[nodiscard]] std::size_t round_up_size(std::size_t size) const noexcept {
-        if (size == 0) {
-            size = 1;
+    /** 上取整到档大小；超出最大池化档返回 0 */
+    [[nodiscard]] std::size_t round_up_size(std::size_t n) const noexcept {
+        if (n == 0) {
+            n = 1;
         }
-        for (std::size_t sz : class_sizes_) {
-            if (size <= sz) {
-                return sz;
-            }
+        if (n > large_threshold_) {
+            return 0;
         }
-        return 0;
+        if (n <= small_max_) {
+            return (n + small_step_ - 1) & ~(small_step_ - 1);
+        }
+        const std::size_t over = n - small_max_;
+        const std::size_t steps = (over + mid_step_ - 1) / mid_step_;
+        return small_max_ + steps * mid_step_;
     }
+
+#if UTILS_POOL_LEAK_CHECK >= 1
+    [[nodiscard]] std::size_t outstanding() const noexcept {
+        return outstanding_;
+    }
+#endif
 
 #if UTILS_POOL_LEAK_CHECK >= 2
-    void dump_leaks() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        dump_leaks_to_unlocked(stderr);
-    }
+    void dump_leaks() const { dump_leaks_to(stderr); }
 #endif
 
 private:
-    struct live_entry {
-        pool_kind kind = pool_kind::auto_select;
-        std::size_t bytes = 0;
-        memory_pool* pool = nullptr;
-#if UTILS_POOL_LEAK_CHECK >= 2
-        std::source_location loc{};
-#endif
+    union free_node {
+        free_node* next;
+        char data[1];
     };
 
-    std::size_t class_index_for(std::size_t size) const {
-        const auto it =
-            std::lower_bound(class_sizes_.begin(), class_sizes_.end(), size);
-        if (it == class_sizes_.end()) {
-            return class_sizes_.size() - 1;
+    std::size_t index_for_rounded(std::size_t bytes) const noexcept {
+        if (bytes <= small_max_) {
+            return bytes / small_step_ - 1;
         }
-        return static_cast<std::size_t>(it - class_sizes_.begin());
+        return small_count_ + (bytes - small_max_) / mid_step_ - 1;
     }
 
-    void track(void* p, live_entry entry) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        live_.emplace(p, entry);
+    void* refill(std::size_t bytes, std::size_t index) {
+        int nobjs = static_cast<int>(config_.refill_objects);
+        char* chunk = chunk_alloc(bytes, nobjs);
+        if (nobjs == 1) {
+            return chunk;
+        }
+        char* cur = chunk + bytes;
+        free_lists_[index] = reinterpret_cast<free_node*>(cur);
+        free_node* current = reinterpret_cast<free_node*>(cur);
+        for (int i = 1; i < nobjs - 1; ++i) {
+            char* next = cur + bytes;
+            current->next = reinterpret_cast<free_node*>(next);
+            current = reinterpret_cast<free_node*>(next);
+            cur = next;
+        }
+        current->next = nullptr;
+        return chunk;
     }
 
-    std::size_t in_use_bytes_unlocked() const {
-        std::size_t n = 0;
-        for (const auto& [ptr, e] : live_) {
-            (void)ptr;
-            n += e.bytes;
+    std::size_t round_down_to_class(std::size_t n) const noexcept {
+        if (n < small_step_) {
+            return 0;
         }
-        return n;
+        if (n <= small_max_) {
+            return n & ~(small_step_ - 1);
+        }
+        const std::size_t over = n - small_max_;
+        const std::size_t steps = over / mid_step_;
+        if (steps == 0) {
+            return small_max_;
+        }
+        return small_max_ + steps * mid_step_;
     }
+
+    char* chunk_alloc(std::size_t size, int& nobjs) {
+        const std::size_t total_bytes = size * static_cast<std::size_t>(nobjs);
+        const std::size_t bytes_left =
+            static_cast<std::size_t>(end_free_ - start_free_);
+
+        if (bytes_left >= total_bytes) {
+            char* result = start_free_;
+            start_free_ += total_bytes;
+            return result;
+        }
+        if (bytes_left >= size) {
+            nobjs = static_cast<int>(bytes_left / size);
+            const std::size_t got = size * static_cast<std::size_t>(nobjs);
+            char* result = start_free_;
+            start_free_ += got;
+            return result;
+        }
+
+        if (bytes_left > 0) {
+            const std::size_t leftover = round_down_to_class(bytes_left);
+            if (leftover >= small_step_) {
+                const std::size_t idx = index_for_rounded(leftover);
+                auto* node = reinterpret_cast<free_node*>(start_free_);
+                node->next = free_lists_[idx];
+                free_lists_[idx] = node;
+            }
+        }
+
+        std::size_t bytes_to_get =
+            2 * total_bytes +
+            ((heap_size_ >> 4) + small_step_ - 1) / small_step_ * small_step_;
+        if (bytes_to_get < total_bytes) {
+            bytes_to_get = total_bytes;
+        }
+
+        start_free_ = static_cast<char*>(std::malloc(bytes_to_get));
+        if (!start_free_) {
+            for (std::size_t i = index_for_rounded(size) + 1; i < nclasses_;
+                 ++i) {
+                free_node* p = free_lists_[i];
+                if (p) {
+                    free_lists_[i] = p->next;
+                    start_free_ = reinterpret_cast<char*>(p);
+                    end_free_ = start_free_ + class_sizes_[i];
+                    return chunk_alloc(size, nobjs);
+                }
+            }
+            throw std::bad_alloc();
+        }
+
+        chunks_.push_back(start_free_);
+        heap_size_ += bytes_to_get;
+        end_free_ = start_free_ + bytes_to_get;
+        return chunk_alloc(size, nobjs);
+    }
+
+#if UTILS_POOL_LEAK_CHECK >= 1
+    void track_alloc(void* p, std::size_t bytes
+#if UTILS_POOL_LEAK_CHECK >= 2
+                     ,
+                     std::source_location loc
+#endif
+    ) {
+        ++outstanding_;
+#if UTILS_POOL_LEAK_CHECK >= 2
+        sites_.emplace(p, site_entry{bytes, loc});
+#else
+        (void)p;
+        (void)bytes;
+#endif
+    }
+
+    void track_dealloc(void* p) noexcept {
+        if (outstanding_ > 0) {
+            --outstanding_;
+        }
+#if UTILS_POOL_LEAK_CHECK >= 2
+        sites_.erase(p);
+#else
+        (void)p;
+#endif
+    }
+#endif
 
 #if UTILS_POOL_LEAK_CHECK >= 2
-    void dump_leaks_to_unlocked(FILE* out) const {
-        std::fprintf(out, "memory_allocator outstanding=%zu\n", live_.size());
-        for (const auto& [ptr, e] : live_) {
-            std::fprintf(out,
-                         "  ptr=%p  bytes=%zu  kind=%d  %s:%u  %s\n", ptr,
-                         e.bytes, static_cast<int>(e.kind), e.loc.file_name(),
-                         e.loc.line(), e.loc.function_name());
+    struct site_entry {
+        std::size_t bytes = 0;
+        std::source_location loc{};
+    };
+
+    void dump_leaks_to(FILE* out) const {
+        std::fprintf(out, "memory_allocator outstanding=%zu\n",
+                     sites_.size());
+        for (const auto& [ptr, e] : sites_) {
+            std::fprintf(out, "  ptr=%p  bytes=%zu  %s:%u  %s\n", ptr,
+                         e.bytes, e.loc.file_name(), e.loc.line(),
+                         e.loc.function_name());
         }
     }
+
+    void report_leaks_to_file() const {
+        const char* path = std::getenv("UTILS_POOL_LEAK_FILE");
+        if (!path || !*path || sites_.empty()) {
+            return;
+        }
+        FILE* f = std::fopen(path, "a");
+        if (!f) {
+            return;
+        }
+        dump_leaks_to(f);
+        std::fclose(f);
+    }
+
+    std::unordered_map<void*, site_entry> sites_;
 #endif
 
     size_class_config config_;
     std::vector<std::size_t> class_sizes_;
-    std::size_t large_threshold_;
-    std::size_t blocks_per_chunk_;
-    std::vector<std::unique_ptr<memory_pool>> classes_;
-    mutable std::mutex mutex_;
-    std::unordered_map<void*, live_entry> live_;
+    static constexpr std::size_t kMaxClasses = 256;
+    free_node* free_lists_[kMaxClasses]{};
+    std::size_t large_threshold_ = 0;
+    std::size_t small_max_ = 0;
+    std::size_t small_step_ = 0;
+    std::size_t mid_step_ = 0;
+    std::size_t small_count_ = 0;
+    std::size_t nclasses_ = 0;
+
+    char* start_free_ = nullptr;
+    char* end_free_ = nullptr;
+    std::size_t heap_size_ = 0;
+    std::vector<void*> chunks_;
+
+#if UTILS_POOL_LEAK_CHECK >= 1
+    std::size_t outstanding_ = 0;
+#endif
 };
 
 }  // namespace utils

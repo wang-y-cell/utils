@@ -8,7 +8,7 @@
  * 主题目录：
  *   concurrency/  — 并发与事件（signal、thread_pool、channel、executor）
  *   reliability/  — 可靠性与错误（result、retry、deadline）
- *   memory/       — 内存管理（memory_resource、memory_pool、memory_allocator、object_pool）
+ *   memory/       — 内存管理（memory_pool、memory_allocator、typed_alloc、object_pool）
  *
  * 按需另含：
  *   #include "concurrency/concurrency.h"          // 仅并发主题

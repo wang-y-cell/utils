@@ -2,8 +2,6 @@
 
 #include <cstdint>
 #include <stdexcept>
-#include <thread>
-#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -38,22 +36,4 @@ TEST(MemoryPool, GrowsAndReusesBlocks) {
     pool.deallocate(nullptr);
     EXPECT_EQ(pool.in_use(), 0u);
     EXPECT_EQ(pool.available(), pool.capacity());
-}
-
-TEST(MemoryPool, ConcurrentAllocateDeallocate) {
-    utils::memory_pool concurrent(32, 32);
-    std::vector<std::thread> workers;
-    for (int t = 0; t < 4; ++t) {
-        workers.emplace_back([&] {
-            for (int i = 0; i < 1000; ++i) {
-                void* p = concurrent.allocate();
-                concurrent.deallocate(p);
-            }
-        });
-    }
-    for (auto& worker : workers) {
-        worker.join();
-    }
-    EXPECT_EQ(concurrent.in_use(), 0u);
-    EXPECT_EQ(concurrent.available(), concurrent.capacity());
 }

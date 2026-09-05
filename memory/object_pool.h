@@ -11,7 +11,7 @@
 namespace utils {
 
 /**
- * 固定类型对象池。
+ * 固定类型对象池（底层 memory_pool，默认无锁）。
  *
  * object_pool 必须比由 create/acquire 创建的所有对象活得更久。
  * 泄漏记录在底层 memory_pool（UTILS_POOL_LEAK_CHECK）。
@@ -45,10 +45,22 @@ public:
 
     template <class... Args>
     [[nodiscard]] T* create(Args&&... args) {
+#if UTILS_POOL_LEAK_CHECK >= 2
         return create_at(std::source_location::current(),
                          std::forward<Args>(args)...);
+#else
+        void* storage = storage_.allocate();
+        try {
+            return std::construct_at(static_cast<T*>(storage),
+                                     std::forward<Args>(args)...);
+        } catch (...) {
+            storage_.deallocate(storage);
+            throw;
+        }
+#endif
     }
 
+#if UTILS_POOL_LEAK_CHECK >= 2
     template <class... Args>
     [[nodiscard]] T* create_at(std::source_location loc, Args&&... args) {
         void* storage = storage_.allocate(loc);
@@ -60,6 +72,7 @@ public:
             throw;
         }
     }
+#endif
 
     void destroy(T* p) noexcept(std::is_nothrow_destructible_v<T>) {
         if (!p) return;
@@ -78,39 +91,50 @@ public:
         }
     }
 
+    /// 创建一个对象,并返回一个智能指针
     template <class... Args>
     [[nodiscard]] pointer acquire(Args&&... args) {
         return pointer(create(std::forward<Args>(args)...), deleter{this});
     }
 
+#if UTILS_POOL_LEAK_CHECK >= 2
+    /// 创建一个对象,并返回一个智能指针,指定分配位置
     template <class... Args>
     [[nodiscard]] pointer acquire_at(std::source_location loc, Args&&... args) {
         return pointer(create_at(loc, std::forward<Args>(args)...),
                        deleter{this});
     }
+#endif
 
+    /// 当前池中总共的内存块数
     [[nodiscard]] std::size_t capacity() const noexcept {
         return storage_.capacity();
     }
 
+    /// 当前池中可用的内存块数
     [[nodiscard]] std::size_t available() const noexcept {
         return storage_.available();
     }
 
+    /// 当前池中正在使用的内存块数
     [[nodiscard]] std::size_t in_use() const noexcept {
         return storage_.in_use();
     }
 
+    /// 获取底层内存池
     [[nodiscard]] memory_pool& storage() noexcept { return storage_; }
+    /// 获取底层内存池
     [[nodiscard]] const memory_pool& storage() const noexcept {
         return storage_;
     }
 
 #if UTILS_POOL_LEAK_CHECK >= 2
+    /// 将泄漏的信息写入标准错误输出的辅助函数
     void dump_leaks() const { storage_.dump_leaks(); }
 #endif
 
 private:
+    /// 底层内存池
     memory_pool storage_;
 };
 
