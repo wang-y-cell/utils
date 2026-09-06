@@ -79,15 +79,15 @@ public:
 
         if constexpr (std::is_nothrow_destructible_v<T>) {
             std::destroy_at(p);
-            storage_.deallocate(p);
+            storage_.deallocate_unchecked(p);
         } else {
             try {
                 std::destroy_at(p);
             } catch (...) {
-                storage_.deallocate(p);
+                storage_.deallocate_unchecked(p);
                 throw;
             }
-            storage_.deallocate(p);
+            storage_.deallocate_unchecked(p);
         }
     }
 

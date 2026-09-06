@@ -22,9 +22,8 @@ int main() {
     alloc.deallocate(small, 48);
     alloc.deallocate(large, alloc.large_threshold() + 64);
 
-    utils::typed_alloc<int> ints(alloc);
-    int* arr = ints.allocate(8);
+    int* arr = utils::typed_alloc<int>::allocate(8);
     arr[0] = 42;
-    ints.deallocate(arr, 8);
-    std::cout << "memory_allocator + typed_alloc: ok\n";
+    utils::typed_alloc<int>::deallocate(arr, 8);
+    std::cout << "typed_alloc: ok\n";
 }

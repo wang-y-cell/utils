@@ -78,6 +78,8 @@ TEST(MemoryAllocator, SizeClassAndRawNew) {
     void* big = alloc.allocate(alloc.large_threshold() + 1);
 #if UTILS_POOL_LEAK_CHECK >= 1
     EXPECT_EQ(alloc.outstanding(), 2u);
+    EXPECT_EQ(alloc.rounding_waste(), 0u);  // 24 正好一档；大块走 new
+    EXPECT_GT(alloc.class_table_bytes(), 0u);
 #endif
     alloc.deallocate(small, 24);
     alloc.deallocate(big, alloc.large_threshold() + 1);
@@ -86,8 +88,42 @@ TEST(MemoryAllocator, SizeClassAndRawNew) {
 #endif
 }
 
+#if UTILS_POOL_LEAK_CHECK >= 1
+TEST(MemoryAllocator, WasteRoundingAndClassTableSeparate) {
+    utils::memory_allocator alloc;
+    const std::size_t table0 = alloc.class_table_bytes();
+    EXPECT_GT(table0, 0u);
+    EXPECT_EQ(alloc.rounding_waste(), 0u);
+
+    // 7 → 8：rounding +1；25 → 32：+7
+    void* a = alloc.allocate(7);
+    void* b = alloc.allocate(25);
+    EXPECT_EQ(alloc.rounding_waste(), 1u + 7u);
+    // 档表开销固定，不随分配累加
+    EXPECT_EQ(alloc.class_table_bytes(), table0);
+    alloc.deallocate(a, 7);
+    alloc.deallocate(b, 25);
+    // lifetime rounding 不因归还回退
+    EXPECT_EQ(alloc.rounding_waste(), 8u);
+
+    auto unlimited = utils::size_class_config::from_bands({{8, 4096}});
+    unlimited.max_classes = 0;
+    utils::memory_allocator dense(unlimited);
+    EXPECT_GT(dense.class_table_bytes(), table0);
+    EXPECT_EQ(dense.size_class_count(), 512u);
+
+    testing::internal::CaptureStderr();
+    alloc.dump_waste();
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_NE(log.find("rounding=8"), std::string::npos);
+    EXPECT_NE(log.find("class_table="), std::string::npos);
+}
+#endif  // UTILS_POOL_LEAK_CHECK >= 1
+
+
 TEST(MemoryAllocator, TwoLevelSizeClasses) {
     utils::memory_allocator alloc;
+    EXPECT_EQ(alloc.band_count(), 2u);
     EXPECT_EQ(alloc.size_class_count(), 47u);
     EXPECT_EQ(alloc.round_up_size(1), 8u);
     EXPECT_EQ(alloc.round_up_size(7), 8u);
@@ -107,6 +143,56 @@ TEST(MemoryAllocator, TwoLevelSizeClasses) {
     alloc.deallocate(c, 3000);
 }
 
+TEST(MemoryAllocator, SingleBand) {
+    utils::memory_allocator alloc(
+        utils::size_class_config::from_bands({{8, 256}}));
+    EXPECT_EQ(alloc.band_count(), 1u);
+    EXPECT_EQ(alloc.size_class_count(), 32u);
+    EXPECT_EQ(alloc.round_up_size(1), 8u);
+    EXPECT_EQ(alloc.round_up_size(9), 16u);
+    EXPECT_EQ(alloc.round_up_size(256), 256u);
+    EXPECT_EQ(alloc.round_up_size(257), 0u);
+
+    void* p = alloc.allocate(40);
+    alloc.deallocate(p, 40);
+
+    // 默认 max_classes=256：8B→4KiB 共 512 档会拒绝
+    EXPECT_THROW(
+        (void)utils::memory_allocator(
+            utils::size_class_config::from_bands({{8, 4096}})),
+        std::invalid_argument);
+
+    // max_classes=0：不设上限
+    auto unlimited = utils::size_class_config::from_bands({{8, 4096}});
+    unlimited.max_classes = 0;
+    utils::memory_allocator dense(unlimited);
+    EXPECT_EQ(dense.size_class_count(), 512u);
+    EXPECT_EQ(dense.round_up_size(9), 16u);
+    EXPECT_EQ(dense.round_up_size(4096), 4096u);
+    void* q = dense.allocate(100);
+    dense.deallocate(q, 100);
+}
+
+TEST(MemoryAllocator, ThreeBands) {
+    utils::memory_allocator alloc(utils::size_class_config::from_bands(
+        {{8, 64}, {32, 256}, {128, 1024}}));
+    EXPECT_EQ(alloc.band_count(), 3u);
+    EXPECT_EQ(alloc.round_up_size(7), 8u);
+    EXPECT_EQ(alloc.round_up_size(64), 64u);
+    EXPECT_EQ(alloc.round_up_size(65), 96u);
+    EXPECT_EQ(alloc.round_up_size(256), 256u);
+    EXPECT_EQ(alloc.round_up_size(257), 384u);
+    EXPECT_EQ(alloc.round_up_size(1024), 1024u);
+    EXPECT_EQ(alloc.round_up_size(1025), 0u);
+
+    void* a = alloc.allocate(50);
+    void* b = alloc.allocate(200);
+    void* c = alloc.allocate(900);
+    alloc.deallocate(a, 50);
+    alloc.deallocate(b, 200);
+    alloc.deallocate(c, 900);
+}
+
 TEST(MemoryAllocator, PresetAndCustomConfig) {
     utils::memory_allocator compact(utils::size_class_preset::compact);
     EXPECT_LT(compact.size_class_count(), 47u);
@@ -117,18 +203,19 @@ TEST(MemoryAllocator, PresetAndCustomConfig) {
     EXPECT_GT(dense.size_class_count(), 47u);
     EXPECT_EQ(dense.round_up_size(200), 200u);
 
-    auto cfg = utils::size_class_config::from_preset(
-        utils::size_class_preset::balanced);
-    cfg.mid_step = 256;
-    cfg.mid_max = 4224;
+    auto cfg = utils::size_class_config::from_two_level(8, 128, 256, 4224);
     utils::memory_allocator tuned(cfg);
     EXPECT_EQ(tuned.round_up_size(129), 384u);
-    EXPECT_EQ(tuned.config().mid_step, 256u);
+    EXPECT_EQ(tuned.config().bands.size(), 2u);
+    EXPECT_EQ(tuned.config().bands[1].step, 256u);
 
     EXPECT_THROW(
-        (void)utils::memory_allocator(utils::size_class_config{
-            .small_step = 0, .small_max = 128, .mid_step = 128,
-            .mid_max = 4096}),
+        (void)utils::memory_allocator(
+            utils::size_class_config::from_bands({{0, 128}})),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)utils::memory_allocator(
+            utils::size_class_config::from_bands({{8, 128}, {128, 100}})),
         std::invalid_argument);
 }
 
@@ -142,13 +229,11 @@ TEST(MemoryAllocator, ReusesFreelist) {
 }
 
 TEST(TypedAlloc, AllocateByElementCount) {
-    utils::memory_allocator raw;
-    utils::typed_alloc<int> ta(raw);
-    int* p = ta.allocate(4);
+    int* p = utils::typed_alloc<int>::allocate(4);
     ASSERT_NE(p, nullptr);
     p[0] = 1;
     p[3] = 4;
     EXPECT_EQ(p[0], 1);
     EXPECT_EQ(p[3], 4);
-    ta.deallocate(p, 4);
+    utils::typed_alloc<int>::deallocate(p, 4);
 }

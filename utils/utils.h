@@ -14,6 +14,7 @@
  *   #include "concurrency/concurrency.h"          // 仅并发主题
  *   #include "concurrency/executor/adapters.h"    // thread_pool / event_loop 适配
  *   #include "concurrency/signal_and_slots/signal_and_slots.h"
+ *   #include "Tools/runtime_test.h"               // 微基准计时（bench::time_us 等）
  *
  * 文档：docs/README.md
  */

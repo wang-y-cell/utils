@@ -37,3 +37,12 @@ TEST(MemoryPool, GrowsAndReusesBlocks) {
     EXPECT_EQ(pool.in_use(), 0u);
     EXPECT_EQ(pool.available(), pool.capacity());
 }
+
+TEST(MemoryPool, UncheckedDeallocateReuses) {
+    utils::memory_pool pool(32, 4);
+    void* a = pool.allocate();
+    pool.deallocate_unchecked(a);
+    void* b = pool.allocate();
+    EXPECT_EQ(a, b);
+    pool.deallocate_unchecked(b);
+}
