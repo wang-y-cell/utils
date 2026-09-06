@@ -39,9 +39,9 @@ cmake --build build --target demo_channel
 生产者线程(s)                    消费者线程
      │                                │
      │  send / try_send               │  recv / try_recv
-     ├──────────►  queue_<T>  ◄────────┤
+     ├──────────►  queue_<T>  ◄───────┤
      │              │                 │
-     │         close() 后             │
+     │         close()后              │
      │   send 失败；recv 排空后 nullopt │
 ```
 
