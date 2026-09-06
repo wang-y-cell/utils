@@ -3,7 +3,7 @@
 /**
  * Try — result/expected 早退宏（成功继续，失败 return）
  *
- *   #include "reliability/result/try.h"
+ *   #include "reliability/try.h"
  *
  *   Try(save());           // 1 参：只检查（适合 result<void> 或只要传播）
  *   Try(x, parse());       // 2 参：解包成功值到 x
@@ -15,7 +15,7 @@
  * 外层函数须返回与 expr 兼容的 result/expected（同类型可直接 return）。
  */
 
-#include "reliability/result/expected.h"
+#include "reliability/expected.h"
 
 #include <utility>
 

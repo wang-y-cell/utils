@@ -7,7 +7,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 头文件 | [`reliability/result/expected.h`](../../reliability/result/expected.h) |
+| 头文件 | [`reliability/expected.h`](../../reliability/expected.h) |
 | 命名空间 | `utils` |
 | 伞头 | 已由 `utils/utils.h` / `reliability/reliability.h` 重导出 |
 | 可运行示例 | `demo/reliability/result/expected_demo.cpp`（目标：`demo_expected`） |
@@ -144,7 +144,7 @@ cmake --build build --target demo_expected
 ## 4. 教程 A：最小检查与取值
 
 ```cpp
-#include "reliability/result/expected.h"
+#include "reliability/expected.h"
 #include <iostream>
 
 using namespace utils;
@@ -280,7 +280,7 @@ if (!r) std::cout << r.error().display();  // file:line in func: message
 
 ## 相关文件
 
-- 实现：`reliability/result/expected.h`
+- 实现：`reliability/expected.h`
 - 示例：`demo/reliability/result/expected_demo.cpp`
 - 测试：`tests/expected_test.cpp`
 - 相关：[retry.md](./retry.md)、[time.md](./time.md)

@@ -1,5 +1,5 @@
-#include "reliability/result/expected.h"
-#include "reliability/result/try.h"
+#include "reliability/expected.h"
+#include "reliability/try.h"
 
 #include <string>
 #include <system_error>

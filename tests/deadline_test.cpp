@@ -1,4 +1,4 @@
-#include "reliability/time/deadline.h"
+#include "reliability/deadline.h"
 
 #include <chrono>
 #include <thread>

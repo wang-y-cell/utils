@@ -10,8 +10,8 @@
  * 取消使用标准库 std::stop_token（可选参数）。
  */
 
-#include "reliability/result/expected.h"
-#include "reliability/time/deadline.h"
+#include "reliability/expected.h"
+#include "reliability/deadline.h"
 
 #include <algorithm>
 #include <chrono>

@@ -7,7 +7,7 @@
  * - 常与 channel::recv 超时逻辑、retry、std::stop_token 组合
  */
 
-#include "reliability/time/deadline.h"
+#include "reliability/deadline.h"
 
 #include <chrono>
 #include <iostream>

@@ -9,7 +9,7 @@
  * - 适合数据流；事件回调请用 signal_and_slots
  */
 
-#include "concurrency/channel/channel.h"
+#include "concurrency/channel.h"
 
 #include <chrono>
 #include <iostream>

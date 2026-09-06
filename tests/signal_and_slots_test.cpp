@@ -1,4 +1,4 @@
-#include "concurrency/signal_and_slots/signal_and_slots.h"
+#include "concurrency/signal_and_slots.h"
 
 #include <atomic>
 #include <chrono>

@@ -5,9 +5,9 @@
 
 | 项 | 说明 |
 |----|------|
-| 头文件 | [`concurrency/signal_and_slots/signal_and_slots.h`](../../concurrency/signal_and_slots/signal_and_slots.h) |
+| 头文件 | [`concurrency/signal_and_slots.h`](../../concurrency/signal_and_slots.h) |
 | 命名空间 | `utils` |
-| 依赖 | [`reliability/result/expected.h`](../../reliability/result/expected.h)（`result<T>`） |
+| 依赖 | [`reliability/expected.h`](../../reliability/expected.h)（`result<T>`） |
 | 可运行示例 | `demo/concurrency/signal_and_slots/sample.cpp`（目标：`demo_signal`） |
 
 ```bash
@@ -218,7 +218,7 @@ signal.emit(...)
 目标：主线程上定义信号、连接成员槽与 lambda、发射。
 
 ```cpp
-#include "concurrency/signal_and_slots/signal_and_slots.h"
+#include "concurrency/signal_and_slots.h"
 #include <iostream>
 #include <string>
 
@@ -593,7 +593,7 @@ loop->cancel_timer(id);
 
 ## 相关文件
 
-- 实现：`concurrency/signal_and_slots/signal_and_slots.h`
+- 实现：`concurrency/signal_and_slots.h`
 - 示例：`demo/concurrency/signal_and_slots/sample.cpp`
 - 测试：`tests/signal_and_slots_test.cpp`
-- 错误类型：`reliability/result/expected.h`（`result` / `err`）
+- 错误类型：`reliability/expected.h`（`result` / `err`）

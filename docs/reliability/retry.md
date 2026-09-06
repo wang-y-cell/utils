@@ -7,7 +7,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 头文件 | [`reliability/retry/retry.h`](../../reliability/retry/retry.h) |
+| 头文件 | [`reliability/retry.h`](../../reliability/retry.h) |
 | 命名空间 | `utils` |
 | 依赖 | `expected.h`、`deadline.h`、`<stop_token>` |
 | 伞头 | 已由 `utils/utils.h` / `reliability/reliability.h` 重导出 |
@@ -130,7 +130,7 @@ retry(op, policy, should_retry, token, deadline);
 ## 4. 教程 A：指数退避直到成功
 
 ```cpp
-#include "reliability/retry/retry.h"
+#include "reliability/retry.h"
 using namespace utils;
 using namespace std::chrono_literals;
 
@@ -190,7 +190,7 @@ auto canceled = retry(
 ## 8. 教程 E：deadline 截断等待
 
 ```cpp
-#include "reliability/time/deadline.h"
+#include "reliability/deadline.h"
 
 auto d = deadline::after(200ms);
 auto r = retry(
@@ -234,7 +234,7 @@ pool.add_task([&] {
 
 ## 相关文件
 
-- 实现：`reliability/retry/retry.h`
+- 实现：`reliability/retry.h`
 - 示例：`demo/reliability/retry/demo.cpp`
 - 测试：`tests/retry_test.cpp`
 - 相关：[result.md](./result.md)、[time.md](./time.md)

@@ -9,9 +9,9 @@
  * - any_executor: 类型擦除，运行时可替换后端
  */
 
-#include "concurrency/executor/adapters.h"
-#include "concurrency/executor/executor.h"
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/adapters.h"
+#include "concurrency/executor.h"
+#include "concurrency/thread_pool.h"
 
 #include <atomic>
 #include <chrono>

@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include "memory/byte_literals.h"
+
 #ifndef UTILS_POOL_LEAK_CHECK
 #define UTILS_POOL_LEAK_CHECK 0
 #endif

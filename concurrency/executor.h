@@ -3,7 +3,7 @@
 /**
  * executor 核心：concept + inline_executor + any_executor（C++20）
  *
- * 适配 thread_pool / event_loop 见 concurrency/executor/adapters.h
+ * 适配 thread_pool / event_loop 见 concurrency/adapters.h
  */
 
 #include "concurrency/detail/any_invocable.h"

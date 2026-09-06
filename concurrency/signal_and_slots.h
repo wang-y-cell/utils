@@ -71,7 +71,7 @@
 #include <utility>
 #include <vector>
 
-#include "reliability/result/expected.h"
+#include "reliability/expected.h"
 
 namespace utils {
 

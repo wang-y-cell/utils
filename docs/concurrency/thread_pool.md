@@ -5,7 +5,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 头文件 | [`concurrency/thread_pool/thread_pool.h`](../../concurrency/thread_pool/thread_pool.h) |
+| 头文件 | [`concurrency/thread_pool.h`](../../concurrency/thread_pool.h) |
 | 命名空间 | `utils` |
 | 伞头 | **未**收录于 `utils.h`，需单独 `#include` |
 | 可运行示例 | `demo/concurrency/thread_pool/demo.cpp`（目标：`demo_thread_pool`） |
@@ -173,7 +173,7 @@ cmake --build build --target demo_thread_pool
 ## 4. 教程 A：最小可用 — submit 拿结果
 
 ```cpp
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/thread_pool.h"
 #include <iostream>
 
 using namespace utils;
@@ -350,9 +350,9 @@ pool.try_add_task([] {});     // false
 业务只依赖「把任务 post 出去」，后端可换成线程池：
 
 ```cpp
-#include "concurrency/executor/executor.h"
-#include "concurrency/executor/adapters.h"
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/executor.h"
+#include "concurrency/adapters.h"
+#include "concurrency/thread_pool.h"
 
 thread_pool pool(4);
 auto ex = make_executor(pool);   // 不拥有 pool，注意生命周期
@@ -393,7 +393,7 @@ ex.post([] { /* 进线程池 */ });
 
 ## 相关文件
 
-- 实现：`concurrency/thread_pool/thread_pool.h`
+- 实现：`concurrency/thread_pool.h`
 - 示例：`demo/concurrency/thread_pool/demo.cpp`
 - 测试：`tests/thread_pool_test.cpp`
-- 执行器适配：`concurrency/executor/adapters.h`、[`executor.md`](./executor.md)
+- 执行器适配：`concurrency/adapters.h`、[`executor.md`](./executor.md)

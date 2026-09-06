@@ -5,8 +5,8 @@
 
 | 项 | 说明 |
 |----|------|
-| 核心头 | [`concurrency/executor/executor.h`](../../concurrency/executor/executor.h)（`utils.h` / `concurrency.h` 会带上） |
-| 适配头 | [`concurrency/executor/adapters.h`](../../concurrency/executor/adapters.h)（**用池/loop 时必须单独 include**） |
+| 核心头 | [`concurrency/executor.h`](../../concurrency/executor.h)（`utils.h` / `concurrency.h` 会带上） |
+| 适配头 | [`concurrency/adapters.h`](../../concurrency/adapters.h)（**用池/loop 时必须单独 include**） |
 | 命名空间 | `utils` |
 | 可运行示例 | `demo/concurrency/executor/demo.cpp`（目标：`demo_executor`） |
 
@@ -55,7 +55,7 @@ executor（接口）
 三条硬规则：
 
 1. **适配器不拥有后端**：`make_executor(pool)` 里的 `pool` 必须活得比 executor 久。
-2. **要用池 / loop，必须 `#include "concurrency/executor/adapters.h"`**（单 include `executor.h` 不够）。
+2. **要用池 / loop，必须 `#include "concurrency/adapters.h"`**（单 include `executor.h` 不够）。
 3. **`post` 没有返回值**；要结果用 `thread_pool::submit`、`promise`，或信号槽的 `invoke`。
 
 推荐入口：
@@ -152,7 +152,7 @@ make_executor(event_loop&);       // → event_loop_executor
 ## 4. 教程 A：inline — 当前线程立刻跑
 
 ```cpp
-#include "concurrency/executor/executor.h"
+#include "concurrency/executor.h"
 
 using namespace utils;
 
@@ -173,9 +173,9 @@ auto sync = make_inline_executor();
 ## 5. 教程 B：接到 thread_pool
 
 ```cpp
-#include "concurrency/executor/executor.h"
-#include "concurrency/executor/adapters.h"
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/executor.h"
+#include "concurrency/adapters.h"
+#include "concurrency/thread_pool.h"
 
 using namespace utils;
 
@@ -198,8 +198,8 @@ pool.wait();   // 仍用池自己的 wait；executor 不提供 wait
 ## 6. 教程 C：接到 event_loop / worker
 
 ```cpp
-#include "concurrency/executor/adapters.h"
-#include "concurrency/signal_and_slots/signal_and_slots.h"
+#include "concurrency/adapters.h"
+#include "concurrency/signal_and_slots.h"
 
 using namespace utils;
 
@@ -228,8 +228,8 @@ ex.post([] { /* 进主线程队列；需 app.exec()/process_events 才会跑 */ 
 ## 7. 教程 D：any_executor 存成员、可替换
 
 ```cpp
-#include "concurrency/executor/adapters.h"
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/adapters.h"
+#include "concurrency/thread_pool.h"
 
 class Service {
 public:
@@ -322,8 +322,8 @@ concept try_executor = executor<E> && requires(E& e, any_invocable<void()>&& f) 
 
 ## 相关文件
 
-- 核心：`concurrency/executor/executor.h`
-- 适配：`concurrency/executor/adapters.h`
+- 核心：`concurrency/executor.h`
+- 适配：`concurrency/adapters.h`
 - 可调用擦除：`concurrency/detail/any_invocable.h`
 - 示例：`demo/concurrency/executor/demo.cpp`
 - 测试：`tests/executor_test.cpp`

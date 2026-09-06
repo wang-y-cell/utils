@@ -7,7 +7,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 头文件 | [`concurrency/channel/channel.h`](../../concurrency/channel/channel.h) |
+| 头文件 | [`concurrency/channel.h`](../../concurrency/channel.h) |
 | 命名空间 | `utils` |
 | 伞头 | 已由 `utils/utils.h` / `concurrency/concurrency.h` 重导出 |
 | 可运行示例 | `demo/concurrency/channel/demo.cpp`（目标：`demo_channel`） |
@@ -131,7 +131,7 @@ cmake --build build --target demo_channel
 ## 4. 教程 A：最小收发
 
 ```cpp
-#include "concurrency/channel/channel.h"
+#include "concurrency/channel.h"
 #include <iostream>
 
 using namespace utils;
@@ -178,7 +178,7 @@ ch.send(3);                    // 现在可以再 send
 ## 6. 教程 C：多生产者 → 关通道 → 排空
 
 ```cpp
-#include "concurrency/channel/channel.h"
+#include "concurrency/channel.h"
 #include <thread>
 
 using namespace utils;
@@ -215,8 +215,8 @@ while (auto v = pipe.recv()) {
 ## 7. 教程 D：和线程池组合
 
 ```cpp
-#include "concurrency/channel/channel.h"
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/channel.h"
+#include "concurrency/thread_pool.h"
 
 thread_pool pool(4);
 channel<int> results(128);
@@ -263,6 +263,6 @@ while (auto v = results.recv()) {
 
 ## 相关文件
 
-- 实现：`concurrency/channel/channel.h`
+- 实现：`concurrency/channel.h`
 - 示例：`demo/concurrency/channel/demo.cpp`
 - 测试：`tests/channel_test.cpp`

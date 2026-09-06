@@ -9,5 +9,6 @@
 #include "memory/memory_allocator.h"
 #include "memory/memory_pool.h"
 #include "memory/memory_resource.h"
+#include "memory/byte_literals.h"
 #include "memory/object_pool.h"
 #include "memory/typed_alloc.h"

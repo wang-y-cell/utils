@@ -1,4 +1,4 @@
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/thread_pool.h"
 
 #include <atomic>
 #include <chrono>

@@ -12,7 +12,7 @@
 * - 禁止在工作线程内调用 worker_thread::stop()
 */
 
-#include "concurrency/signal_and_slots/signal_and_slots.h"
+#include "concurrency/signal_and_slots.h"
 
 #include <atomic>
 #include <chrono>

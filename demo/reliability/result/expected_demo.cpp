@@ -9,7 +9,7 @@
  * - 链式: and_then / transform / or_else / transform_error
  */
 
-#include "reliability/result/expected.h"
+#include "reliability/expected.h"
 
 #include <iostream>
 #include <string>

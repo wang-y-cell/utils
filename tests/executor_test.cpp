@@ -1,5 +1,5 @@
-#include "concurrency/executor/adapters.h"
-#include "concurrency/executor/executor.h"
+#include "concurrency/adapters.h"
+#include "concurrency/executor.h"
 
 #include <atomic>
 #include <chrono>

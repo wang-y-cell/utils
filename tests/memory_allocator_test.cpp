@@ -219,6 +219,20 @@ TEST(MemoryAllocator, PresetAndCustomConfig) {
         std::invalid_argument);
 }
 
+TEST(ByteLiterals, PowersOfTwoUnits) {
+    using namespace utils::byte_literals;
+    EXPECT_EQ(1_KB, 1024u);
+    EXPECT_EQ(4_KB, 4096u);
+    EXPECT_EQ(1_MB, 1024u * 1024u);
+    EXPECT_EQ(1_GB, 1024u * 1024u * 1024u);
+    EXPECT_EQ(1_TB, 1024ull * 1024ull * 1024ull * 1024ull);
+
+    utils::memory_allocator alloc(
+        utils::size_class_config::from_bands({{8, 128}, {128, 4_KB}}));
+    EXPECT_EQ(alloc.round_up_size(4_KB), 4_KB);
+    EXPECT_EQ(alloc.round_up_size(4_KB + 1), 0u);
+}
+
 TEST(MemoryAllocator, ReusesFreelist) {
     utils::memory_allocator alloc;
     void* a = alloc.allocate(64);

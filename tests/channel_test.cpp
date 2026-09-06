@@ -1,4 +1,4 @@
-#include "concurrency/channel/channel.h"
+#include "concurrency/channel.h"
 
 #include <atomic>
 #include <optional>

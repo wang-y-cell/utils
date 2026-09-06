@@ -7,7 +7,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 头文件 | [`reliability/time/deadline.h`](../../reliability/time/deadline.h) |
+| 头文件 | [`reliability/deadline.h`](../../reliability/deadline.h) |
 | 命名空间 | `utils` |
 | 伞头 | 已由 `utils/utils.h` / `reliability/reliability.h` 重导出 |
 | 可运行示例 | `demo/reliability/time/demo.cpp`（目标：`demo_deadline`） |
@@ -105,7 +105,7 @@ deadline = 墙上的一个绝对时刻（steady_clock）
 ## 4. 教程 A：after + 轮询到过期
 
 ```cpp
-#include "reliability/time/deadline.h"
+#include "reliability/deadline.h"
 #include <thread>
 
 using namespace utils;
@@ -147,8 +147,8 @@ auto d = deadline::at(tp);
 ## 7. 教程 D：交给 retry
 
 ```cpp
-#include "reliability/retry/retry.h"
-#include "reliability/time/deadline.h"
+#include "reliability/retry.h"
+#include "reliability/deadline.h"
 
 auto d = deadline::after(200ms);
 auto r = retry(
@@ -187,7 +187,7 @@ auto r = retry(
 
 ## 相关文件
 
-- 实现：`reliability/time/deadline.h`
+- 实现：`reliability/deadline.h`
 - 示例：`demo/reliability/time/demo.cpp`
 - 测试：`tests/deadline_test.cpp`
 - 相关：[retry.md](./retry.md)、[result.md](./result.md)

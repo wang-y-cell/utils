@@ -1,4 +1,4 @@
-#include "concurrency/executor/adapters.h"
+#include "concurrency/adapters.h"
 #include "memory/memory.h"
 #include "utils/utils.h"
 

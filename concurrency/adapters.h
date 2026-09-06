@@ -6,10 +6,10 @@
  * 不拥有后端；move-only 可调用经 shared_ptr 包装以适配 std::function 任务队列。
  */
 
-#include "concurrency/executor/executor.h"
+#include "concurrency/executor.h"
 
-#include "concurrency/signal_and_slots/signal_and_slots.h"
-#include "concurrency/thread_pool/thread_pool.h"
+#include "concurrency/signal_and_slots.h"
+#include "concurrency/thread_pool.h"
 
 #include <memory>
 #include <type_traits>
