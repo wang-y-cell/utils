@@ -39,7 +39,7 @@
 | **1** | 本地联调、配 bands | 计数 ±1；allocator 累加 rounding |
 | **2** | `utils_tests`、定位泄漏点 | 哈希表 + `source_location` |
 
-`utils_tests` 固定为档 **2**。`main` 基准：档 **0** 只打耗时，档 **1** 只打浪费（见下文）。
+`utils_tests` 固定为档 **2**。`time_test/memory.cpp`（目标 `time_memory`）：档 **0** 只打耗时，档 **1** 只打浪费（见下文）。
 
 ---
 
@@ -55,7 +55,7 @@
 
 只有业务自己的日志。池本身析构静默（即使未归还块也不会告警——这是为速度做的取舍，上线前应用档 1/2 验过）。
 
-### `main` 在档 0 的输出（计时）
+### `time_memory` 在档 0 的输出（计时）
 
 ```text
 fixed 64B, alloc+free immediately  N=200000  (LEAK_CHECK=0 timing)
@@ -73,7 +73,8 @@ fixed 64B, alloc+free immediately  N=200000  (LEAK_CHECK=0 timing)
 编译示例：
 
 ```bash
-g++ -std=c++20 -O2 -I. -DUTILS_POOL_LEAK_CHECK=0 main.cpp -o main_t.exe
+cmake --build build --target time_memory
+# 或: g++ -std=c++20 -O2 -I. -DUTILS_POOL_LEAK_CHECK=0 time_test/memory.cpp -o time_memory.exe
 ```
 
 ---
@@ -146,7 +147,7 @@ memory_allocator waste: rounding=12347527 (11.776 MB)  class_table=816 (816 B)  
 
 **不要把 `rounding` 与 `class_table` 加在一起**——量纲与含义都不同。
 
-### `main` 在档 1 的输出（只报浪费）
+### `time_memory` 在档 1 的输出（只报浪费）
 
 ```text
 memory_allocator waste  (LEAK_CHECK>=1; rounding vs class_table separate)
@@ -167,7 +168,9 @@ memory_allocator waste  (LEAK_CHECK>=1; rounding vs class_table separate)
 | `default ~4KiB` 跑 MiB | 几乎全走 `new` → rounding=0（未走池化上取整） |
 
 ```bash
-g++ -std=c++20 -O2 -I. -DUTILS_POOL_LEAK_CHECK=1 main.cpp -o main_w.exe
+cmake -S . -B build -DUTILS_POOL_LEAK_CHECK=1
+cmake --build build --target time_memory
+# 或: g++ -std=c++20 -O2 -I. -DUTILS_POOL_LEAK_CHECK=1 time_test/memory.cpp -o time_memory_w.exe
 ```
 
 ---
@@ -294,4 +297,4 @@ memory_allocator c(size_class_config::from_bands(
 - 上线用档 **0**；查漏用 **2**；调步长/段数用 **1** 看 rounding vs class_table。
 - `typed_alloc<T>` ≈ SGI `simple_alloc`（静态接口 + 每线程底层池）。
 - `fixed_block_resource` 可选，把 `memory_pool` 接到 `memory_resource`；热路径更推荐直连池。
-- 示例：`demo/memory/demo.cpp`；基准：`main.cpp`（0 计时 / 1 浪费）。
+- 示例：`demo/memory/demo.cpp`；基准：`time_test/memory.cpp`（目标 `time_memory`；0 计时 / 1 浪费）。

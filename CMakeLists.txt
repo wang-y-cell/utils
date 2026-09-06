@@ -57,6 +57,36 @@ utils_add_exe(demo_signal        demo/concurrency/signal_and_slots/sample.cpp)
 utils_add_exe(demo_channel       demo/concurrency/channel/demo.cpp)
 utils_add_exe(demo_memory        demo/memory/demo.cpp)
 
+# ---- microbenchmarks (time_test/) ----
+utils_add_exe(time_signal        time_test/signal_and_slots.cpp)
+utils_add_exe(time_memory        time_test/memory.cpp)
+
+add_custom_target(time_tests DEPENDS time_signal time_memory)
+
+# 可选：Qt 信号槽对照（需 Qt6 + 匹配的 MinGW，见 time_test/qt_signal_and_slots.cpp 头注释）
+set(UTILS_QT_PREFIX "F:/Qt/6.8.3/mingw_64" CACHE PATH "Qt6 prefix for time_qt_signal")
+list(APPEND CMAKE_PREFIX_PATH "${UTILS_QT_PREFIX}")
+find_package(Qt6 QUIET COMPONENTS Core)
+if(Qt6_FOUND)
+  add_executable(time_qt_signal
+    time_test/qt_signal_and_slots.cpp
+    time_test/qt_signal_bench.h
+  )
+  set_target_properties(time_qt_signal PROPERTIES AUTOMOC ON)
+  target_include_directories(time_qt_signal PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/time_test
+  )
+  target_link_libraries(time_qt_signal PRIVATE Qt6::Core)
+  target_compile_features(time_qt_signal PRIVATE cxx_std_20)
+  # 避免 Qt 的 emit/signals/slots 宏污染其它目标；本目标需要 moc，保留关键词
+  # 加入 .gitignore 的 build_qt 由本地对照使用
+  add_dependencies(time_tests time_qt_signal)
+  message(STATUS "time_qt_signal: Qt6 ${Qt6_VERSION} at ${UTILS_QT_PREFIX}")
+else()
+  message(STATUS "time_qt_signal: skipped (Qt6 Core not found; set UTILS_QT_PREFIX)")
+endif()
+
 add_custom_target(demos DEPENDS
   demo_expected
   demo_retry

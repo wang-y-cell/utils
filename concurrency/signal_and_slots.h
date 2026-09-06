@@ -39,10 +39,11 @@
  *   2) 派生类析构第一行必须 invalidate()（会断连；若当前在亲和线程则
  *      process_events 排空）（堆对象优先 object_uptr / delete_later，可减少手动
  *      invalidate）
- *   3) 跨线程 Direct 会自动降级为 Queued；Queued/BlockingQueued 无 loop 则丢弃
- *      BlockingQueued 要求目标 loop 正在泵（is_pumping）；未泵则跳过/失败，避免死等
- *      仅当「当前线程正在泵本 loop」时 post_blocking 因自死锁失败
- *      跨线程且无 loop 时 Auto/Direct 不再降级为发射线程 Direct，直接跳过
+ *   3) Direct：始终在 emit 线程同步调用（与 Qt Direct 类似；跨线程时调用方自担
+ *      数据竞争）。Automatic：同线程 Direct，跨线程 Queued。Queued/BlockingQueued
+ *      无 loop 则丢弃。BlockingQueued 要求目标 loop 正在泵（is_pumping）；未泵则
+ *      跳过/失败，避免死等。仅当「当前线程正在泵本 loop」时 post_blocking 因自死锁失败
+ *      跨线程且无 loop 时 Auto 不再降级为发射线程 Direct，直接跳过
  *   4) 禁止在工作线程里调用 worker_thread::stop()（硬失败，不销毁 loop）
  *   5) 主线程建议先构造 core_application（或依赖 object 内 ensure_thread）
  *   6) 堆上 object 建议只用 object_uptr/object_sptr 拥有；connect 仅观察不延长寿命
@@ -76,7 +77,7 @@
 namespace utils {
 
 enum class connection_type {
-	direct,          // 同步：在 emit 所在线程执行
+	direct,          // 同步：始终在 emit 线程执行（跨线程亦然，调用方自担安全）
 	queued,          // 异步：投递到接收者所属 event_loop
 	blocking_queued, // 跨线程投递并等待目标线程执行完成（要求目标 loop 正在 run）
 	automatic        // 同线程 Direct，跨线程 Queued
@@ -1066,19 +1067,21 @@ public:
 		std::vector<std::shared_ptr<connection_state>> states;
 		{
 			std::lock_guard<std::mutex> lock(_ctl->mutex);
-			for (auto &e : _ctl->entries) {
-				if (e._receiver != receiver || !e._state)
+			auto cur = _ctl->load_list();
+			auto draft = std::make_shared<entry_list>();
+			draft->reserve(cur->size());
+			for (const auto &e : *cur) {
+				if (e._receiver == receiver) {
+					if (e._state &&
+						e._state->_alive.exchange(false,
+							std::memory_order_acq_rel)) {
+						states.push_back(e._state);
+					}
 					continue;
-				if (e._state->_alive.exchange(false, std::memory_order_acq_rel)) {
-					states.push_back(e._state);
 				}
+				draft->push_back(e);
 			}
-			_ctl->entries.erase(std::remove_if(_ctl->entries.begin(),
-				_ctl->entries.end(),
-				[receiver](const entry &e) {
-				return e._receiver == receiver;
-			}),
-				_ctl->entries.end());
+			_ctl->store_list(std::move(draft));
 		}
 		for (auto &s : states) {
 			if (s && s->_disconnect_fn)
@@ -1103,11 +1106,13 @@ public:
 		std::vector<std::shared_ptr<connection_state>> states;
 		{
 			std::lock_guard<std::mutex> lock(_ctl->mutex);
-			for (auto &e : _ctl->entries) {
+			auto cur = _ctl->load_list();
+			states.reserve(cur->size());
+			for (const auto &e : *cur) {
 				if (e._state)
 					states.push_back(e._state);
 			}
-			_ctl->entries.clear();
+			_ctl->store_list(std::make_shared<entry_list>());
 		}
 		for (auto &s : states) {
 			if (!s)
@@ -1125,29 +1130,19 @@ public:
 	void emit(Args... args) const {
 		if (signals_blocked())
 			return;
-		thread_local std::vector<entry> tls_scratch;
-		struct snapshot_guard {
-			std::vector<entry> &tls;
-			std::vector<entry> snapshot;
-			explicit snapshot_guard(std::vector<entry> &t) : tls(t) {
-				snapshot.swap(tls);
-				snapshot.clear();
+
+		// 读者计数 + 裸指针：避免 atomic<shared_ptr> 每次 emit 改引用计数
+		_ctl->readers.fetch_add(1, std::memory_order_acquire);
+		struct reader_guard {
+			control *c;
+			~reader_guard() {
+				c->readers.fetch_sub(1, std::memory_order_release);
 			}
-			~snapshot_guard() {
-				snapshot.clear();
-				tls.swap(snapshot);
-			}
-		} guard(tls_scratch);
-		auto &snapshot = guard.snapshot;
-		{
-			std::lock_guard<std::mutex> lock(_ctl->mutex);
-			snapshot.reserve(_ctl->entries.size());
-			for (const auto &e : _ctl->entries) {
-				if (e._state && e._state->_alive.load(std::memory_order_acquire)) {
-					snapshot.push_back(e);
-				}
-			}
-		}
+		} guard{_ctl.get()};
+
+		const entry_list *snap = _ctl->published.load(std::memory_order_acquire);
+		if (!snap || snap->empty())
+			return;
 
 		auto make_bound_args = [&] {
 			if constexpr ((std::is_copy_constructible_v<Args> && ...)) {
@@ -1168,79 +1163,66 @@ public:
 			std::apply(*bound_slot, std::move(bound_args));
 		};
 
-		for (const auto &e : snapshot) {
+		utils::thread *const self_thread = ensure_thread();
+
+		for (const auto &e : *snap) {
 			if (!e._state || !e._slot ||
 				!e._state->_alive.load(std::memory_order_acquire))
 				continue;
 
 			std::shared_ptr<void> gate;
-			std::shared_ptr<event_loop> target_loop;
-			utils::thread *target_thread = nullptr;
 			if (e._receiver) {
 				gate = e._receiver_alive.lock();
 				if (!gate)
 					continue;
 				if (!e._receiver->is_valid())
 					continue;
-				target_thread = e._receiver->thread();
-				target_loop = e._receiver->loop_shared();
 			} else if (e._receiver_alive.expired()) {
 				continue;
 			}
 
-			const bool same_thread =
-				(target_thread != nullptr && target_thread == ensure_thread());
-
-			bool use_direct = false;
-			bool use_blocking = false;
-			if (e._type == connection_type::queued) {
-				if (!target_loop)
-					continue;
-				use_direct = false;
-			} else if (e._type == connection_type::blocking_queued) {
-				if (same_thread) {
-					use_direct = true;
-				} else if (!target_loop || !target_loop->is_pumping()) {
-					continue;
-				} else {
-					use_blocking = true;
-				}
-			} else if (e._type == connection_type::direct) {
-				if (same_thread) {
-					use_direct = true;
-				} else if (!target_loop) {
-					continue;
-				} else {
-					use_direct = false;
-				}
-			} else {
-				if (same_thread) {
-					use_direct = true;
-				} else if (!target_loop) {
-					continue;
-				} else {
-					use_direct = false;
-				}
+			// Direct：与 Qt 类似，始终在发射线程同步调用（跨线程亦然；调用方自担安全）
+			if (e._type == connection_type::direct) {
+				(*e._slot)(args...);
+				continue;
 			}
 
-			if (use_direct) {
-				if (e._receiver && (!gate || !e._receiver->is_valid()))
-					continue;
+			utils::thread *target_thread =
+				e._receiver ? e._receiver->thread() : nullptr;
+			const bool same_thread =
+				(target_thread != nullptr && target_thread == self_thread);
+
+			if ((e._type == connection_type::automatic ||
+					e._type == connection_type::blocking_queued) &&
+				same_thread) {
 				(*e._slot)(args...);
-			} else if (use_blocking) {
+				continue;
+			}
+
+			if (e._type == connection_type::queued ||
+				(e._type == connection_type::automatic && !same_thread)) {
+				if (!e._receiver)
+					continue;
+				auto target_loop = e._receiver->loop_shared();
 				if (!target_loop)
 					continue;
-				(void)target_loop->post_blocking(
+				(void)target_loop->post(
 					[bound_slot = e._slot, bound_args = make_bound_args(),
 						weak = e._receiver_alive, receiver = e._receiver,
 						invoke_queued]() mutable {
 					invoke_queued(bound_slot, std::move(bound_args), weak,
 						receiver);
 				});
-			} else {
-				if (!target_loop)
+				continue;
+			}
+
+			if (e._type == connection_type::blocking_queued) {
+				if (!e._receiver)
 					continue;
-				(void)target_loop->post(
+				auto target_loop = e._receiver->loop_shared();
+				if (!target_loop || !target_loop->is_pumping())
+					continue;
+				(void)target_loop->post_blocking(
 					[bound_slot = e._slot, bound_args = make_bound_args(),
 						weak = e._receiver_alive, receiver = e._receiver,
 						invoke_queued]() mutable {
@@ -1298,10 +1280,44 @@ private:
 		slot_key _key;
 	};
 
+	using entry_list = std::vector<entry>;
+
 	struct control {
 		mutable std::mutex mutex;
-		std::vector<entry> entries;
+		/// 当前已发布表（裸指针供 emit 无锁读；所有权在 current / graveyard）
+		std::atomic<const entry_list *> published{nullptr};
+		std::shared_ptr<const entry_list> current;
+		std::vector<std::shared_ptr<const entry_list>> graveyard;
+		std::atomic<std::uint32_t> readers{0};
 		std::uint64_t next_id = 1;
+
+		control() {
+			current = std::make_shared<const entry_list>();
+			published.store(current.get(), std::memory_order_release);
+		}
+
+		/// 调用方须已持有 mutex
+		std::shared_ptr<const entry_list> load_list() const { return current; }
+
+		/// 调用方须已持有 mutex；COW 发布新表
+		void store_list(std::shared_ptr<entry_list> draft) {
+			std::shared_ptr<const entry_list> next(std::move(draft));
+			const entry_list *raw = next.get();
+			auto old = std::move(current);
+			current = std::move(next);
+			published.store(raw, std::memory_order_release);
+			if (old) {
+				if (readers.load(std::memory_order_acquire) == 0) {
+					old.reset();
+				} else {
+					graveyard.push_back(std::move(old));
+				}
+			}
+			if (readers.load(std::memory_order_acquire) == 0 &&
+				!graveyard.empty()) {
+				graveyard.clear();
+			}
+		}
 	};
 
 	template <class M> static slot_key make_pmf_key(object *receiver, M method) {
@@ -1321,9 +1337,11 @@ private:
 		std::uint64_t id = 0;
 		{
 			std::lock_guard<std::mutex> lock(_ctl->mutex);
+			auto cur = _ctl->load_list();
 			if (unique && key.equal) {
-				for (const auto &e : _ctl->entries) {
-					if (e._state && e._state->_alive.load(std::memory_order_acquire) &&
+				for (const auto &e : *cur) {
+					if (e._state &&
+						e._state->_alive.load(std::memory_order_acquire) &&
 						e._key.matches(key)) {
 						return {};
 					}
@@ -1337,17 +1355,21 @@ private:
 			state->_disconnect_fn = [wctl, id, wrecv, receiver]() {
 				if (auto ctl = wctl.lock()) {
 					std::lock_guard<std::mutex> lock(ctl->mutex);
-					ctl->entries.erase(std::remove_if(ctl->entries.begin(),
-						ctl->entries.end(),
-						[id](const entry &e) {
-						return e._state && e._state->_id == id;
-					}),
-						ctl->entries.end());
+					auto cur = ctl->load_list();
+					auto draft = std::make_shared<entry_list>();
+					draft->reserve(cur->size());
+					for (const auto &e : *cur) {
+						if (e._state && e._state->_id == id)
+							continue;
+						draft->push_back(e);
+					}
+					ctl->store_list(std::move(draft));
 				}
 				if (receiver && wrecv.lock())
 					receiver->untrack_inbound(id);
 			};
 
+			auto draft = std::make_shared<entry_list>(*cur);
 			entry e;
 			e._state = state;
 			e._receiver = receiver;
@@ -1356,7 +1378,8 @@ private:
 			e._slot = std::make_shared<slot>(std::move(slot_));
 			e._type = type;
 			e._key = std::move(key);
-			_ctl->entries.push_back(std::move(e));
+			draft->push_back(std::move(e));
+			_ctl->store_list(std::move(draft));
 		}
 
 		if (receiver && !receiver->track_inbound(state)) {
@@ -1425,13 +1448,7 @@ private:
 			return r;
 		}
 		if (type == connection_type::direct) {
-			if (same_thread) {
-				r.use_direct = true;
-			} else if (!loop_) {
-				r.error = std::errc::operation_not_permitted;
-			} else {
-				r.error = std::errc::operation_in_progress;
-			}
+			r.use_direct = true;
 			return r;
 		}
 		if (same_thread) {
@@ -1641,7 +1658,7 @@ result<R> invoke(const std::shared_ptr<Recv> &receiver,
 /**
 * @brief 在 receiver 所在线程调用普通函数/lambda，并用 result 取回返回值。
 * @note 必须带 connection_type，避免与 invoke(object*, function<void()>)
-* 投递重载冲突。 Queued / 跨线程 Auto / 跨线程 Direct 无法同步取值 →
+* 投递重载冲突。 Queued / 跨线程 Auto 无法同步取值 →
 * operation_in_progress。
 */
 template <class F, class... Args,
@@ -1712,13 +1729,7 @@ inline void invoke(object *receiver, std::function<void()> fn,
 			use_blocking = true;
 		}
 	} else if (type == connection_type::direct) {
-		if (same_thread) {
-			use_direct = true;
-		} else if (!loop_) {
-			return;
-		} else {
-			use_direct = false;
-		}
+		use_direct = true;
 	} else {
 		if (same_thread) {
 			use_direct = true;
