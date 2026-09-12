@@ -55,7 +55,7 @@ TEST(Glue, Executor) {
     pool.wait();
     EXPECT_EQ(y, 4);
 
-    worker_thread worker;
+    thread worker;
     worker.start();
     for (int i = 0; i < 200 && !worker.is_running(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
