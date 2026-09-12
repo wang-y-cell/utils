@@ -62,6 +62,56 @@ TEST(SlotsT, ValueConstructConvertAndGet) {
 
 TEST(SlotsT, VoidSpecialization) { utils::slots_t<> v; (void)v; }
 
+
+/// =============================================================================
+/// method_key
+/// =============================================================================
+
+class method_key_test {
+public:
+    utils::slots_t<> test_method() {
+        return {};
+    }
+
+    utils::slots_t<> test_method2() {
+        return {};
+    }
+};
+
+
+TEST(MethodKey, ConstructorAndEquality) {
+    utils::detail::method_key mk1;
+    utils::detail::method_key mk2;
+    utils::detail::method_key mk3;
+    mk1.type = std::type_index(typeid(utils::slots_t<>(method_key_test::*)()));
+    auto pmf = &method_key_test::test_method;
+    std::memcpy(mk1.bytes.data(), &pmf, sizeof(pmf));
+    mk1.size = static_cast<std::uint8_t>(sizeof(pmf));
+
+    mk2.type = std::type_index(typeid(utils::slots_t<>(method_key_test::*)()));
+    auto pmf2 = &method_key_test::test_method;
+    std::memcpy(mk2.bytes.data(), &pmf2, sizeof(pmf2));
+    mk2.size = static_cast<std::uint8_t>(sizeof(pmf2)); 
+
+    mk3.type = std::type_index(typeid(utils::slots_t<>(method_key_test::*)()));
+    auto pmf3 = &method_key_test::test_method2;
+    std::memcpy(mk3.bytes.data(), &pmf3, sizeof(pmf3));
+    mk3.size = static_cast<std::uint8_t>(sizeof(pmf3));
+
+    EXPECT_EQ(mk1, mk2);
+    EXPECT_NE(mk1, mk3);
+    EXPECT_NE(mk2, mk3);
+}
+
+TEST(MethodKey, MakeMethodKey) {
+    utils::detail::method_key mk = utils::detail::make_method_key(&method_key_test::test_method);
+    utils::detail::method_key mk2 = utils::detail::make_method_key(&method_key_test::test_method);
+    utils::detail::method_key mk3 = utils::detail::make_method_key(&method_key_test::test_method2);
+    EXPECT_EQ(mk, mk2);
+    EXPECT_NE(mk, mk3);
+    EXPECT_NE(mk2, mk3);
+}
+
 // =============================================================================
 // aliases
 // =============================================================================
@@ -115,6 +165,11 @@ TEST(Thread, StartStop) {
     worker.stop();
     EXPECT_FALSE(worker.is_running());
 }
+
+// TEST(Thread, ThreadLoop) {
+//     utils::thread worker;
+//     worker.loop();
+// }
 
 // =============================================================================
 // slot affinity

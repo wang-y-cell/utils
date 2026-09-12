@@ -42,7 +42,8 @@ include(GoogleTest)
 
 file(GLOB UTILS_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 add_executable(utils_tests ${UTILS_TEST_SOURCES})
-target_link_libraries(utils_tests PRIVATE utils::utils GTest::gtest_main)
+# 使用 tests/main.cpp 作为入口（勿链 gtest_main，否则重复定义 main）
+target_link_libraries(utils_tests PRIVATE utils::utils GTest::gtest)
 # 测试构建默认开泄漏档 2，便于 dump / 定位用例
 target_compile_definitions(utils_tests PRIVATE UTILS_POOL_LEAK_CHECK=2)
 gtest_discover_tests(utils_tests DISCOVERY_MODE PRE_TEST)

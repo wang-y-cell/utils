@@ -171,7 +171,7 @@ struct method_key_hash {
 			h ^= static_cast<std::size_t>(k.bytes[i]) + 0x9e3779b9u + (h << 6) + (h >> 2);
 		}
 		return h;
-	}
+}
 };
 
 struct affinity_value {

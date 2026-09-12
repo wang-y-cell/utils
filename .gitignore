@@ -1,7 +1,6 @@
 build/
 build-*/
 build_qt/
-main.cpp
 libpath/
 .vscode/
 .cache/
