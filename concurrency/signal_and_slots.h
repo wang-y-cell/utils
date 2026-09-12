@@ -15,9 +15,9 @@
  *   - 接收者寿命仅通过 sptr / wptr（连接内部存 weak_ptr）；无 trackable、
  *     无裸指针 forever-token
  *   - 必须用自由函数 utils::connect(...)；signal::connect 为 private
- *   - 亲和表 (receiver, 成员方法) -> thread*：connect(..., thread*) 写入；
- *     invoke / 无显式 thread* 的 connect 查表；可存 receiver 的 wptr 并在
- *     find 时 lock 校验
+ *   - 亲和表 unordered_map：receiver → (method_key → thread*)；
+ *     method_key = type_index + PMF 字节；connect(..., thread*) 写入；
+ *     invoke / 无显式 thread* 的 connect 查表；sptr 绑定存 wptr 并在 find 时校验
  *   - 每条连接在 connect 时固定目标 thread*（entry._target）；emit 的
  *     Queued / Auto / BlockingQueued 投递到该 thread 的 loop
  *   - 仅有 worker 式 thread（spawn OS 线程 + event_loop）；无
@@ -50,21 +50,26 @@
  */
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <typeindex>
 #include <typeinfo>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -144,43 +149,88 @@ struct event_loop_pump_scope {
 	event_loop_pump_scope &operator=(const event_loop_pump_scope &) = delete;
 };
 
-/// 亲和表：(receiver, member method) -> thread*
-/// 成员函数指针经 type 擦除存放；equal + typeid 用于比较。
-/// 若绑定来自 sptr/wptr，另存 receiver_alive，find 时 lock 校验寿命。
-struct affinity_binding {
-	const void *receiver = nullptr;
-	bool has_receiver_alive = false;
-	std::weak_ptr<void> receiver_alive;
-	const std::type_info *pmf_type = nullptr;
-	std::shared_ptr<void> pmf;
-	bool (*equal)(const void *, const void *) = nullptr;
-	thread *target = nullptr;
-	std::weak_ptr<void> target_alive;
+/// 亲和表：(receiver → (method_key → value))，unordered_map
+/// method_key = type_index(M) + PMF 字节；find 时校验 weak 寿命。
+struct method_key {
+	std::type_index type{typeid(void)}; // 成员函数指针的类型
+	std::array<unsigned char, 32> bytes{}; // 成员函数转换成一段原始字节
+	std::uint8_t size = 0;
+
+	bool operator==(const method_key &o) const {
+		return type == o.type && size == o.size && 
+			std::memcmp(bytes.data(), o.bytes.data(), size) == 0;
+	}
 };
 
-/// @brief 获取亲和表锁,亲和表是多线程安全的,所以需要一个锁来保护亲和表
+///哈希函数,通过一个method_key获得一个哈希值
+struct method_key_hash {
+	std::size_t operator()(const method_key &k) const noexcept {
+		std::size_t h = k.type.hash_code(); //只标识成员函数指针的类型,不表示哪个成员函数
+		//0x9e3779b9u（黄金比例的倒数）
+		for(std::uint8_t i = 0; i < k.size; i++) {
+			h ^= static_cast<std::size_t>(k.bytes[i]) + 0x9e3779b9u + (h << 6) + (h >> 2);
+		}
+		return h;
+	}
+};
+
+struct affinity_value {
+	bool has_receiver_alive = false; // 是否存在接收者
+	std::weak_ptr<void> receiver_alive; // 接收者的生存状态
+	thread *target = nullptr; // 目标线程
+	std::weak_ptr<void> target_alive; // 目标线程的生存状态
+};
+
+using method_affinity_map =
+	std::unordered_map<method_key, affinity_value, method_key_hash>;
+
+///亲和表,双层hash表,第一层指向接收者对象,第二层指向这个对象的成员函数
+using affinity_map = std::unordered_map<const void *, method_affinity_map>;
+
 inline std::mutex &affinity_mutex() {
 	static std::mutex m;
 	return m;
 }
 
-/// @brief 获取亲和表,此表是存储所有绑定信息的表
-inline std::vector<affinity_binding> &affinity_bindings() {
-	static std::vector<affinity_binding> v;
-	return v;
+inline affinity_map &affinity_bindings() {
+	static affinity_map m;
+	return m;
 }
 
-/// @brief 比较亲和表中的成员函数指针是否相等
-/// @param b 亲和表中的绑定信息
-/// @param receiver 接收者对象
-/// @param method 函数
-/// @return 是否相等
+/// @brief 将成员函数转换成method_key,用于亲和表的查找
 template <class M>
-bool affinity_match(const affinity_binding &b, const void *receiver,
-	M method) {
-	if (b.receiver != receiver || !b.equal || b.pmf_type != &typeid(M) || !b.pmf)
-		return false;
-	return b.equal(b.pmf.get(), &method);
+method_key make_method_key(M method) {
+	static_assert(std::is_member_function_pointer_v<M>); //必须是成员函数
+	static_assert(sizeof(M) <= 32); //成员函数大小不能超过32字节
+	method_key k;
+	k.type = std::type_index(typeid(M));
+	//将这个函数的地址强制转换成一段原始字节,大小刚好是M字节的大小
+	std::memcpy(k.bytes.data(), &method, sizeof(M));
+	k.size = static_cast<std::uint8_t>(sizeof(M)); // 设置成员内存字节大小
+	return k;
+}
+
+/// @brief 更新亲和表,根据接收者和成员函数更新表
+/// @param receiver 接收者对象
+/// @param method 成员函数
+/// @param target 目标线程
+/// @param target_alive 目标线程的生存状态,weak_ptr指向目标线程的对象
+/// @param has_receiver_alive 是否存在接收者
+/// @param receiver_alive 接收者的生存状态,weak_ptr指向接收者对象
+template <class M>
+void affinity_upsert(const void *receiver, M method, thread *t,
+	std::weak_ptr<void> target_alive, bool has_receiver_alive,
+	std::weak_ptr<void> receiver_alive) {
+	auto &outer = affinity_bindings();
+	auto &inner = outer[receiver];
+	affinity_value &v = inner[make_method_key(method)];
+	v.target = t;
+	v.target_alive = std::move(target_alive);
+	v.has_receiver_alive = has_receiver_alive;
+	if (has_receiver_alive)
+		v.receiver_alive = std::move(receiver_alive);
+	else
+		v.receiver_alive.reset();
 }
 
 } // namespace detail
@@ -627,37 +677,23 @@ private:
 
 using worker_thread = thread;
 
-/// @brief 绑定槽函数与目标线程,将其加入亲和表中,如果表中存在就修改这个槽的目标线程,不再新建立一条
+/// @brief 绑定槽函数与目标线程（unordered_map；已存在则覆盖 target）
 /// @param receiver 接收者对象
-/// @param method 槽函数
-/// @param t 目标线程
+/// @param method 成员函数
+/// @param target 目标线程
+/// @return 连接对象
 template <class M>
 void bind_slot_affinity(const void *receiver, M method, thread *t) {
 	if (!receiver || !method)
 		return;
+	std::weak_ptr<void> target_alive =
+		t ? t->identity() : std::weak_ptr<void>{};
 	std::lock_guard<std::mutex> lock(detail::affinity_mutex());
-	auto &vec = detail::affinity_bindings();
-	for (auto &b : vec) {
-		if (detail::affinity_match(b, receiver, method)) {
-			b.target = t;
-			b.target_alive = t ? t->identity() : std::weak_ptr<void>{};
-			return;
-		}
-	}
-	detail::affinity_binding b;
-	b.receiver = receiver;
-	b.has_receiver_alive = false;
-	b.pmf_type = &typeid(M);
-	b.pmf = std::make_shared<M>(method);
-	b.equal = [](const void *a, const void *bptr) {
-		return *static_cast<const M *>(a) == *static_cast<const M *>(bptr);
-	};
-	b.target = t;
-	if (t)
-		b.target_alive = t->identity();
-	vec.push_back(std::move(b));
+	detail::affinity_upsert(receiver, method, t, std::move(target_alive),
+		false, {});
 }
 
+/// @brief 绑定槽函数与目标线程
 template <class Recv, class M>
 void bind_slot_affinity(const sptr<Recv> &receiver, M method, thread *t) {
 	if (!receiver || !method)
@@ -665,30 +701,11 @@ void bind_slot_affinity(const sptr<Recv> &receiver, M method, thread *t) {
 	const void *raw = receiver.get();
 	std::weak_ptr<void> life(
 		std::static_pointer_cast<void>(sptr<Recv>(receiver)));
+	std::weak_ptr<void> target_alive =
+		t ? t->identity() : std::weak_ptr<void>{};
 	std::lock_guard<std::mutex> lock(detail::affinity_mutex());
-	auto &vec = detail::affinity_bindings();
-	for (auto &b : vec) {
-		if (detail::affinity_match(b, raw, method)) {
-			b.target = t;
-			b.target_alive = t ? t->identity() : std::weak_ptr<void>{};
-			b.has_receiver_alive = true;
-			b.receiver_alive = life;
-			return;
-		}
-	}
-	detail::affinity_binding b;
-	b.receiver = raw;
-	b.has_receiver_alive = true;
-	b.receiver_alive = std::move(life);
-	b.pmf_type = &typeid(M);
-	b.pmf = std::make_shared<M>(method);
-	b.equal = [](const void *a, const void *bptr) {
-		return *static_cast<const M *>(a) == *static_cast<const M *>(bptr);
-	};
-	b.target = t;
-	if (t)
-		b.target_alive = t->identity();
-	vec.push_back(std::move(b));
+	detail::affinity_upsert(raw, method, t, std::move(target_alive), true,
+		std::move(life));
 }
 
 template <class Recv, class M>
@@ -705,18 +722,21 @@ thread *find_slot_affinity(const void *receiver, M method) {
 	if (!receiver || !method)
 		return nullptr;
 	std::lock_guard<std::mutex> lock(detail::affinity_mutex());
-	for (const auto &b : detail::affinity_bindings()) {
-		if (!detail::affinity_match(b, receiver, method))
-			continue;
-		if (b.has_receiver_alive && !b.receiver_alive.lock())
-			return nullptr;
-		if (!b.target)
-			return nullptr;
-		if (!b.target_alive.lock())
-			return nullptr;
-		return b.target;
-	}
-	return nullptr;
+	auto &outer = detail::affinity_bindings();
+	auto oit = outer.find(receiver);
+	if (oit == outer.end())
+		return nullptr;
+	auto mit = oit->second.find(detail::make_method_key(method));
+	if (mit == oit->second.end())
+		return nullptr;
+	const detail::affinity_value &v = mit->second;
+	if (v.has_receiver_alive && !v.receiver_alive.lock())
+		return nullptr;
+	if (!v.target)
+		return nullptr;
+	if (!v.target_alive.lock())
+		return nullptr;
+	return v.target;
 }
 
 template <class Recv, class M>
@@ -734,19 +754,28 @@ thread *find_slot_affinity(const wptr<Recv> &receiver, M method) {
 	return find_slot_affinity(locked, method);
 }
 
-/// @brief 清除亲和表中接收者为 receiver 的绑定；并顺带清掉已失效的 receiver_alive
+/// @brief 清除该 receiver 的全部绑定；并清掉 receiver_alive 已失效的条目
 inline void clear_slot_affinity(const void *receiver) {
 	std::lock_guard<std::mutex> lock(detail::affinity_mutex());
-	auto &vec = detail::affinity_bindings();
-	vec.erase(std::remove_if(vec.begin(), vec.end(),
-				  [receiver](const detail::affinity_binding &b) {
-					  if (receiver && b.receiver == receiver)
-						  return true;
-					  if (b.has_receiver_alive && !b.receiver_alive.lock())
-						  return true;
-					  return false;
-				  }),
-		vec.end());
+	auto &outer = detail::affinity_bindings();
+	if (receiver)
+		outer.erase(receiver);
+
+	for (auto oit = outer.begin(); oit != outer.end();) {
+		auto &inner = oit->second;
+		for (auto mit = inner.begin(); mit != inner.end();) {
+			if (mit->second.has_receiver_alive &&
+				!mit->second.receiver_alive.lock()) {
+				mit = inner.erase(mit);
+			} else {
+				++mit;
+			}
+		}
+		if (inner.empty())
+			oit = outer.erase(oit);
+		else
+			++oit;
+	}
 }
 
 template <class Recv>
@@ -835,6 +864,7 @@ template <typename... Args> class signal {
 	friend struct detail::signal_connecter;
 
 public:
+	/// @brief 槽函数类型,参数为信号的参数类型
 	using slot = std::function<void(Args...)>;
 
 	signal() noexcept = default;
@@ -1154,6 +1184,14 @@ private:
 		}
 	}
 
+	/// @brief 连接成员函数,将成员函数绑定到信号上,并返回一个连接对象
+	/// @param receiver 接收者对象
+	/// @param method 成员函数
+	/// @param target 目标线程
+	/// @param type 连接类型
+	/// @param unique 是否唯一
+	/// @param bind_affinity 是否绑定亲和表,不绑定表示先查看亲和表,没有找到再emit线程运行
+	/// @return 连接对象
 	template <typename Recv, typename Method>
 	connection connect_pmf_shared(const sptr<Recv> &receiver, Method method,
 		thread *target, connection_type type, bool unique, bool bind_affinity) {
@@ -1190,6 +1228,7 @@ private:
 		}
 	};
 
+	/// @brief 连接项,保存连接的详细信息,包括这个连接的接收者,槽函数,存活状态,目标线程等,连接方式
 	struct entry {
 		std::shared_ptr<connection_state> _state;
 		void *_receiver = nullptr;
@@ -1201,14 +1240,16 @@ private:
 		slot_key _key;
 	};
 
+	/// @brief 连接项列表,保存所有连接的详细信息
 	using entry_list = std::vector<entry>;
 
+	/// @brief 控制器,管理连接项列表,包括互斥锁,已发布列表,当前列表,垃圾列表,读者计数,下一个ID
 	struct control {
 		mutable std::mutex mutex;
 		std::atomic<const entry_list *> published{nullptr};
 		std::shared_ptr<const entry_list> current;
-		std::vector<std::shared_ptr<const entry_list>> graveyard;
-		std::atomic<std::uint32_t> readers{0};
+		std::vector<std::shared_ptr<const entry_list>> graveyard; // 垃圾列表,保存已废弃的连接项列表
+		std::atomic<std::uint32_t> readers{0}; // 读者计数,用于管理连接项列表的并发访问
 		std::uint64_t next_id = 1;
 
 		control() {
@@ -1218,6 +1259,7 @@ private:
 
 		std::shared_ptr<const entry_list> load_list() const { return current; }
 
+		/// @brief 存储连接项列表,更新已发布列表,垃圾列表,读者计数
 		void store_list(std::shared_ptr<entry_list> draft) {
 			std::shared_ptr<const entry_list> next(std::move(draft));
 			const entry_list *raw = next.get();
@@ -1233,7 +1275,7 @@ private:
 			}
 			if (readers.load(std::memory_order_acquire) == 0 &&
 				!graveyard.empty()) {
-				graveyard.clear();
+				graveyard.clear(); // 清除垃圾列表
 			}
 		}
 	};

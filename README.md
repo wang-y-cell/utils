@@ -30,7 +30,7 @@ C++20 **header-only** 工具库，面向日常业务里的并发、错误处理�
 
 ### 并发与事件
 
-- [信号槽与事件循环](./docs/concurrency/signal_and_slots.md)
+- [安全的信号槽与事件循环](./docs/concurrency/signal_and_slots.md)
 - [线程池](./docs/concurrency/thread_pool.md)
 - [Channel](./docs/concurrency/channel.md)
 - [Executor](./docs/concurrency/executor.md)

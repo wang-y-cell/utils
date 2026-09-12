@@ -40,8 +40,31 @@ public:
         return {};
     }
 
+    void hit_direct() {
+        ++hits;
+        escape(&hits);
+    }
+
     std::uint64_t hits = 0;
 };
+
+struct virt_base {
+    virtual ~virt_base() = default;
+    virtual void hit() = 0;
+};
+
+struct virt_counter : virt_base {
+    void hit() override {
+        ++hits;
+        escape(&hits);
+    }
+    std::uint64_t hits = 0;
+};
+
+void free_hit(std::uint64_t *p) {
+    ++*p;
+    escape(p);
+}
 
 class emitter {
 public:
@@ -67,6 +90,48 @@ int main() {
             }
         });
 
+        counter plain;
+        plain.hits = 0;
+        const auto member = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                plain.hit_direct();
+            }
+        });
+
+        virt_counter vc;
+        virt_base *vb = &vc;
+        const auto virt = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                vb->hit();
+            }
+        });
+
+        void (*fp)(std::uint64_t *) = free_hit;
+        const auto via_fp = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                fp(&sink);
+            }
+        });
+
+        void (counter::*pmf)() = &counter::hit_direct;
+        counter *pc = &plain;
+        plain.hits = 0;
+        const auto via_pmf = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                (pc->*pmf)();
+            }
+        });
+
+        auto lambda = [&] {
+            ++sink;
+            escape(&sink);
+        };
+        const auto via_lambda = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                lambda();
+            }
+        });
+
         std::function<void()> fn = [&] {
             ++sink;
             escape(&sink);
@@ -88,11 +153,17 @@ int main() {
             }
         });
 
-        print_title("same-thread Direct  N=200000  (1 slot vs baselines)");
+        print_title("same-thread Direct  N=200000  (1 slot vs call kinds)");
         print_ns_per("raw ++", raw, N);
+        print_ns_per("member call", member, N);
+        print_ns_per("virtual call", virt, N);
+        print_ns_per("function pointer", via_fp, N);
+        print_ns_per("member pointer", via_pmf, N);
+        print_ns_per("lambda (direct)", via_lambda, N);
         print_ns_per("std::function", via_fn, N);
         print_ns_per("signal Direct 1 slot", direct1, N);
-        std::cout << "  (hits=" << dst->hits << ")\n\n";
+        std::cout << "  (signal hits=" << dst->hits << ", virt hits=" << vc.hits
+                  << ", member hits=" << plain.hits << ")\n\n";
     }
 
     {

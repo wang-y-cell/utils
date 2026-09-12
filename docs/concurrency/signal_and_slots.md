@@ -135,6 +135,8 @@ template<class T> using wptr = std::weak_ptr<T>;
 
 ### 2.5 亲和表
 
+实现为两级 `unordered_map`：`receiver* → (method_key → thread*)`；`method_key = type_index + PMF 字节`。
+
 | 操作 | 怎么写 | 说明 |
 |------|--------|------|
 | 绑定 | `bind_slot_affinity(sp.get(), &T::slot, &w);` 或 connect 带 `thread*` | 同一槽重复 bind 会覆盖 |

@@ -29,6 +29,32 @@ namespace {
 
 constexpr int N = 200000;
 
+struct plain_counter {
+    std::uint64_t hits = 0;
+    void hit_direct() {
+        ++hits;
+        escape(&hits);
+    }
+};
+
+struct virt_base {
+    virtual ~virt_base() = default;
+    virtual void hit() = 0;
+};
+
+struct virt_counter : virt_base {
+    std::uint64_t hits = 0;
+    void hit() override {
+        ++hits;
+        escape(&hits);
+    }
+};
+
+void free_hit(std::uint64_t* p) {
+    ++*p;
+    escape(p);
+}
+
 void print_ns_per(const char* name, long long us, int n) {
     const double ns = (n > 0) ? (us * 1000.0 / n) : 0.0;
     std::cout << "  " << name << ": " << us << " us (" << (us / 1000.0)
@@ -40,13 +66,55 @@ void print_ns_per(const char* name, long long us, int n) {
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
 
-    // ---------- 1) 同线程 Direct：相对裸调用 ----------
+    // ---------- 1) 同线程 Direct：相对各类函数调用 ----------
     {
         std::uint64_t sink = 0;
         const auto raw = time_us([&] {
             for (int i = 0; i < N; ++i) {
                 ++sink;
                 escape(&sink);
+            }
+        });
+
+        plain_counter plain;
+        plain.hits = 0;
+        const auto member = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                plain.hit_direct();
+            }
+        });
+
+        virt_counter vc;
+        virt_base* vb = &vc;
+        const auto virt = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                vb->hit();
+            }
+        });
+
+        void (*fp)(std::uint64_t*) = free_hit;
+        const auto via_fp = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                fp(&sink);
+            }
+        });
+
+        void (plain_counter::*pmf)() = &plain_counter::hit_direct;
+        plain_counter* pc = &plain;
+        plain.hits = 0;
+        const auto via_pmf = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                (pc->*pmf)();
+            }
+        });
+
+        auto lambda = [&] {
+            ++sink;
+            escape(&sink);
+        };
+        const auto via_lambda = time_us([&] {
+            for (int i = 0; i < N; ++i) {
+                lambda();
             }
         });
 
@@ -73,11 +141,17 @@ int main(int argc, char* argv[]) {
         escape(&dst.hits);
 
         print_title(
-            "[Qt] same-thread Direct  N=200000  (1 slot vs baselines)");
+            "[Qt] same-thread Direct  N=200000  (1 slot vs call kinds)");
         print_ns_per("raw ++", raw, N);
+        print_ns_per("member call", member, N);
+        print_ns_per("virtual call", virt, N);
+        print_ns_per("function pointer", via_fp, N);
+        print_ns_per("member pointer", via_pmf, N);
+        print_ns_per("lambda (direct)", via_lambda, N);
         print_ns_per("std::function", stdfn, N);
         print_ns_per("Qt Direct 1 slot", direct1, N);
-        std::cout << "  (hits=" << dst.hits << ")\n\n";
+        std::cout << "  (Qt hits=" << dst.hits << ", virt hits=" << vc.hits
+                  << ", member hits=" << plain.hits << ")\n\n";
     }
 
     // ---------- 2) Direct：0 / 1 / 8 槽 ----------
