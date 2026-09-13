@@ -1,8 +1,12 @@
 #include "memory/memory_pool.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -177,3 +181,154 @@ TEST(MemoryPool, DeallocateClearsLeakSite) {
 }
 
 #endif  // UTILS_POOL_LEAK_CHECK >= 2
+
+// =============================================================================
+// memory_pool — 边界 / 扩容上限
+// =============================================================================
+
+TEST(MemoryPool, AlignmentRaisedToPointerAlignment) {
+    // 请求 alignment=1（合法 2 的幂），实现会抬到至少 alignof(void*)
+    utils::memory_pool pool(16, 4, 1);
+    EXPECT_GE(pool.alignment(), alignof(void*));
+    void* p = pool.allocate();
+    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(p) % pool.alignment(), 0u);
+    pool.deallocate(p);
+}
+
+TEST(MemoryPool, GrowChunkSizeCapsAtAbout1MiB) {
+    // block_size=64KiB → 上限 next_size ≈ 1MiB/64KiB = 16
+    constexpr std::size_t kBlock = 64u * 1024u;
+    utils::memory_pool pool(kBlock, 4, alignof(std::max_align_t));
+
+    std::vector<void*> ptrs;
+    // 4 + 8 + 16 + 16 + 16 ... 吃掉几次「封顶后」的扩容
+    const std::size_t need = 4 + 8 + 16 + 16 + 16;
+    ptrs.reserve(need);
+    for (std::size_t i = 0; i < need; ++i) {
+        ptrs.push_back(pool.allocate());
+    }
+    // 4+8+16+16+16 = 60
+    EXPECT_EQ(pool.capacity(), 60u);
+    EXPECT_EQ(pool.in_use(), need);
+
+    for (void* p : ptrs) {
+        pool.deallocate(p);
+    }
+    EXPECT_EQ(pool.in_use(), 0u);
+}
+
+#if UTILS_POOL_LEAK_CHECK >= 2
+
+TEST(MemoryPool, LeakFileEnvWritesOnDestroy) {
+    const char* path = "utils_pool_leak_test_out.txt";
+    std::remove(path);
+#ifdef _WIN32
+    ASSERT_EQ(_putenv_s("UTILS_POOL_LEAK_FILE", path), 0);
+#else
+    ASSERT_EQ(setenv("UTILS_POOL_LEAK_FILE", path, 1), 0);
+#endif
+    {
+        testing::internal::CaptureStderr();
+        {
+            utils::memory_pool pool(32, 2);
+            (void)pool.allocate(); // 故意泄漏，析构写文件
+        }
+        (void)testing::internal::GetCapturedStderr();
+    }
+#ifdef _WIN32
+    _putenv_s("UTILS_POOL_LEAK_FILE", "");
+#else
+    unsetenv("UTILS_POOL_LEAK_FILE");
+#endif
+
+    FILE* f = std::fopen(path, "r");
+    ASSERT_NE(f, nullptr);
+    char buf[512]{};
+    const std::size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    std::remove(path);
+    ASSERT_GT(n, 0u);
+    const std::string log(buf, n);
+    EXPECT_NE(log.find("outstanding="), std::string::npos);
+}
+
+#endif  // UTILS_POOL_LEAK_CHECK >= 2
+
+// =============================================================================
+// memory_pool — 压力
+// =============================================================================
+
+TEST(MemoryPoolStress, AllocateFreeChurn) {
+    constexpr int rounds = 200;
+    constexpr int batch = 1024;
+    utils::memory_pool pool(64, 32);
+    std::vector<void*> ptrs;
+    ptrs.reserve(batch);
+
+    for (int r = 0; r < rounds; ++r) {
+        ptrs.clear();
+        for (int i = 0; i < batch; ++i) {
+            ptrs.push_back(pool.allocate());
+        }
+        EXPECT_EQ(pool.in_use(), static_cast<std::size_t>(batch));
+        // 交错归还，打乱 freelist 顺序
+        for (int i = 0; i < batch; i += 2) {
+            pool.deallocate(ptrs[static_cast<std::size_t>(i)]);
+        }
+        for (int i = 1; i < batch; i += 2) {
+            pool.deallocate(ptrs[static_cast<std::size_t>(i)]);
+        }
+        EXPECT_EQ(pool.in_use(), 0u);
+        EXPECT_EQ(pool.available(), pool.capacity());
+    }
+}
+
+TEST(MemoryPoolStress, ReuseStability) {
+    utils::memory_pool pool(48, 16);
+    void* first = pool.allocate();
+    pool.deallocate(first);
+    for (int i = 0; i < 50000; ++i) {
+        void* p = pool.allocate();
+        EXPECT_EQ(p, first);
+        pool.deallocate_unchecked(p);
+    }
+    EXPECT_EQ(pool.in_use(), 0u);
+}
+
+TEST(MemoryPoolStress, ConcurrentWithExternalMutex) {
+    utils::memory_pool pool(32, 64);
+    std::mutex mu;
+    constexpr int threads_n = 4;
+    constexpr int ops = 5000;
+    std::vector<std::thread> workers;
+    workers.reserve(threads_n);
+
+    for (int t = 0; t < threads_n; ++t) {
+        workers.emplace_back([&] {
+            std::vector<void*> local;
+            local.reserve(64);
+            for (int i = 0; i < ops; ++i) {
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    local.push_back(pool.allocate());
+                }
+                if (local.size() >= 64) {
+                    for (void* p : local) {
+                        std::lock_guard<std::mutex> lock(mu);
+                        pool.deallocate(p);
+                    }
+                    local.clear();
+                }
+            }
+            for (void* p : local) {
+                std::lock_guard<std::mutex> lock(mu);
+                pool.deallocate(p);
+            }
+        });
+    }
+    for (auto& th : workers) {
+        th.join();
+    }
+    EXPECT_EQ(pool.in_use(), 0u);
+    EXPECT_EQ(pool.available(), pool.capacity());
+}
