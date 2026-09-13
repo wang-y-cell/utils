@@ -130,7 +130,7 @@ TEST(SmartPtrAliases, SptrUptrWptr) {
 }
 
 // =============================================================================
-// event_loop / thread（节选）
+// event_loop（公开 API 全覆盖）
 // =============================================================================
 
 TEST(EventLoop, PostAndProcessEvents) {
@@ -139,6 +139,67 @@ TEST(EventLoop, PostAndProcessEvents) {
     EXPECT_TRUE(loop.post([&] { value = 1; }));
     loop.process_events();
     EXPECT_EQ(value, 1);
+}
+
+TEST(EventLoop, PostEmptyTaskReturnsFalse) {
+    utils::event_loop loop;
+    EXPECT_FALSE(loop.post(nullptr));
+    EXPECT_FALSE(loop.post({}));
+}
+
+TEST(EventLoop, PostAfterStopReturnsFalse) {
+    utils::event_loop loop;
+    loop.stop();
+    EXPECT_FALSE(loop.is_running());
+    EXPECT_FALSE(loop.post([] {}));
+}
+
+TEST(EventLoop, SetAcceptingReenablesPostAfterStop) {
+    utils::event_loop loop;
+    loop.stop();
+    EXPECT_FALSE(loop.post([] {}));
+    loop.set_accepting(true);
+    EXPECT_TRUE(loop.is_running());
+    int value = 0;
+    EXPECT_TRUE(loop.post([&] { value = 7; }));
+    loop.process_events();
+    EXPECT_EQ(value, 7);
+}
+
+TEST(EventLoop, ProcessEventsWithBudgetWaitsForDelayed) {
+    utils::event_loop loop;
+    int value = 0;
+    EXPECT_NE(loop.post_delayed(std::chrono::milliseconds(20),
+                                [&] { value = 3; }),
+              0u);
+    loop.process_events(std::chrono::milliseconds(200));
+    EXPECT_EQ(value, 3);
+}
+
+TEST(EventLoop, ProcessEventsSwallowsTaskException) {
+    utils::event_loop loop;
+    int value = 0;
+    EXPECT_TRUE(loop.post([] { throw std::runtime_error("boom"); }));
+    EXPECT_TRUE(loop.post([&] { value = 1; }));
+    EXPECT_NO_THROW(loop.process_events());
+    EXPECT_EQ(value, 1);
+}
+
+TEST(EventLoop, IsPumpingDuringProcessEvents) {
+    utils::event_loop loop;
+    EXPECT_FALSE(loop.is_pumping());
+    EXPECT_FALSE(loop.is_pumping_on_current_thread());
+    bool saw_pumping = false;
+    bool saw_on_current = false;
+    EXPECT_TRUE(loop.post([&] {
+        saw_pumping = loop.is_pumping();
+        saw_on_current = loop.is_pumping_on_current_thread();
+    }));
+    loop.process_events();
+    EXPECT_TRUE(saw_pumping);
+    EXPECT_TRUE(saw_on_current);
+    EXPECT_FALSE(loop.is_pumping());
+    EXPECT_FALSE(loop.is_pumping_on_current_thread());
 }
 
 TEST(EventLoop, PostBlockingFromOtherThreadSucceeds) {
@@ -152,6 +213,141 @@ TEST(EventLoop, PostBlockingFromOtherThreadSucceeds) {
     EXPECT_TRUE(worker.loop()->post_blocking([&] { value = 42; }));
     EXPECT_EQ(value.load(), 42);
     worker.stop();
+}
+
+TEST(EventLoop, PostBlockingFailsWhenNotPumping) {
+    utils::event_loop loop;
+    EXPECT_FALSE(loop.is_pumping());
+    EXPECT_FALSE(loop.post_blocking([] {}));
+}
+
+TEST(EventLoop, PostBlockingEmptyTaskReturnsFalse) {
+    utils::thread worker;
+    worker.start();
+    ASSERT_TRUE(wait_until([&] {
+        auto *loop = worker.loop();
+        return loop && loop->is_pumping();
+    }));
+    EXPECT_FALSE(worker.loop()->post_blocking(nullptr));
+    worker.stop();
+}
+
+TEST(EventLoop, PostBlockingRejectsSelfDeadlock) {
+    utils::event_loop loop;
+    bool rejected = false;
+    EXPECT_TRUE(loop.post([&] {
+        rejected = !loop.post_blocking([] {});
+    }));
+    loop.process_events();
+    EXPECT_TRUE(rejected);
+}
+
+TEST(EventLoop, PostBlockingRethrowsTaskException) {
+    utils::thread worker;
+    worker.start();
+    ASSERT_TRUE(wait_until([&] {
+        auto *loop = worker.loop();
+        return loop && loop->is_pumping();
+    }));
+    EXPECT_THROW(worker.loop()->post_blocking(
+                     [] { throw std::runtime_error("blocking boom"); }),
+                 std::runtime_error);
+    worker.stop();
+}
+
+TEST(EventLoop, PostDelayedZeroActsAsPost) {
+    utils::event_loop loop;
+    int value = 0;
+    EXPECT_EQ(loop.post_delayed(std::chrono::milliseconds(0),
+                                [&] { value = 9; }),
+              0u);
+    loop.process_events();
+    EXPECT_EQ(value, 9);
+}
+
+TEST(EventLoop, PostDelayedEmptyOrStoppedReturnsZero) {
+    utils::event_loop loop;
+    EXPECT_EQ(loop.post_delayed(std::chrono::milliseconds(10), nullptr), 0u);
+    loop.stop();
+    EXPECT_EQ(loop.post_delayed(std::chrono::milliseconds(10), [] {}), 0u);
+}
+
+TEST(EventLoop, PostDelayedFiresAfterDelay) {
+    utils::event_loop loop;
+    int value = 0;
+    const auto id =
+        loop.post_delayed(std::chrono::milliseconds(30), [&] { value = 5; });
+    EXPECT_NE(id, 0u);
+    loop.process_events();
+    EXPECT_EQ(value, 0);
+    loop.process_events(std::chrono::milliseconds(200));
+    EXPECT_EQ(value, 5);
+}
+
+TEST(EventLoop, CancelTimerPreventsDelayedTask) {
+    utils::event_loop loop;
+    int value = 0;
+    const auto id =
+        loop.post_delayed(std::chrono::milliseconds(30), [&] { value = 1; });
+    ASSERT_NE(id, 0u);
+    loop.cancel_timer(id);
+    loop.cancel_timer(0); // no-op
+    loop.process_events(std::chrono::milliseconds(200));
+    EXPECT_EQ(value, 0);
+}
+
+TEST(EventLoop, PostPeriodicInvalidArgsReturnZero) {
+    utils::event_loop loop;
+    EXPECT_EQ(loop.post_periodic(std::chrono::milliseconds(10), nullptr), 0u);
+    EXPECT_EQ(loop.post_periodic(std::chrono::milliseconds(0), [] {}), 0u);
+    loop.stop();
+    EXPECT_EQ(loop.post_periodic(std::chrono::milliseconds(10), [] {}), 0u);
+}
+
+TEST(EventLoop, PostPeriodicFiresMultipleTimesUntilCancelled) {
+    utils::event_loop loop;
+    std::atomic<int> count{0};
+    const auto id = loop.post_periodic(std::chrono::milliseconds(25),
+                                       [&] { count.fetch_add(1); });
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(wait_until(
+        [&] {
+            loop.process_events(std::chrono::milliseconds(40));
+            return count.load() >= 2;
+        },
+        std::chrono::milliseconds(1000)));
+    loop.cancel_timer(id);
+    const int after_cancel = count.load();
+    loop.process_events(std::chrono::milliseconds(80));
+    EXPECT_LE(count.load(), after_cancel + 1);
+}
+
+TEST(EventLoop, RunProcessesPostedTaskThenStop) {
+    utils::event_loop loop;
+    std::atomic<int> value{0};
+    std::thread runner([&] { loop.run(); });
+    ASSERT_TRUE(wait_until([&] { return loop.is_pumping(); }));
+    EXPECT_TRUE(loop.post([&] { value = 11; }));
+    ASSERT_TRUE(wait_until([&] { return value.load() == 11; }));
+    loop.stop();
+    runner.join();
+    EXPECT_FALSE(loop.is_running());
+}
+
+TEST(EventLoop, StopWakesRun) {
+    utils::event_loop loop;
+    std::thread runner([&] { loop.run(); });
+    ASSERT_TRUE(wait_until([&] { return loop.is_pumping(); }));
+    loop.stop();
+    runner.join();
+    EXPECT_FALSE(loop.is_running());
+}
+
+TEST(EventLoop, IsRunningDefaultsTrue) {
+    utils::event_loop loop;
+    EXPECT_TRUE(loop.is_running());
+    loop.stop();
+    EXPECT_FALSE(loop.is_running());
 }
 
 TEST(Thread, CurrentThreadNullOnMain) {

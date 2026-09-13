@@ -141,8 +141,8 @@ namespace detail {
 
 /// 泵 loop 时标记本线程 tls_pumping_loop 与对象泵送深度。
 struct event_loop_pump_scope {
-	event_loop *self;
-	event_loop *prev_pumping;
+	event_loop *self; //当前正在泵的event_loop
+	event_loop *prev_pumping; //之前正在泵的event_loop
 	explicit event_loop_pump_scope(event_loop *loop) noexcept;
 	~event_loop_pump_scope();
 	event_loop_pump_scope(const event_loop_pump_scope &) = delete;
@@ -215,7 +215,7 @@ method_key make_method_key(M method) {
 /// @param method 成员函数
 /// @param target 目标线程
 /// @param target_alive 目标线程的生存状态,weak_ptr指向目标线程的对象
-/// @param has_receiver_alive 是否存在接收者
+/// @param has_receiver_alive 有没有可用的「接收者寿命」弱引用
 /// @param receiver_alive 接收者的生存状态,weak_ptr指向接收者对象
 template <class M>
 void affinity_upsert(const void *receiver, M method, thread *t,
@@ -508,21 +508,22 @@ private:
 	};
 
 	struct timer_item {
-		clock::time_point _when;
-		timer_id _id;
-		task _task;
-		clock::duration _interval;
+		clock::time_point _when; //定时器到期时间
+		timer_id _id; //定时器id
+		task _task; //定时器任务
+		clock::duration _interval; //定时器周期,如果为0则表示一次性定时器
 
 		bool operator>(const timer_item &o) const { return _when > o._when; }
 	};
 
+	/// 根据时间戳优先队列,拿出最近的时间戳的定时器,抽出要执行的任务,放入任务队列并唤醒事件循环
 	void flush_due_timers_unlocked() {
 		const auto now = clock::now();
 		while (!_timers.empty() && _timers.top()._when <= now) {
-			timer_item item = _timers.top();
-			_timers.pop();
+			timer_item item = _timers.top(); //取出即将到期的定时器
+			_timers.pop(); //移除已到期的定时器
 			if (_cancelled.erase(item._id) > 0)
-				continue;
+				continue; //如果定时器已取消，则跳过
 
 			if (item._interval > clock::duration::zero()) {
 				task body = std::move(item._task);
@@ -531,11 +532,11 @@ private:
 				_tasks.push([this, body = std::move(body), id, interval]() mutable {
 					{
 						std::lock_guard<std::mutex> lock(_mutex);
-						if (_cancelled.erase(id) > 0)
+						if (_cancelled.erase(id) > 0) //如果定时器已取消，则跳过
 							return;
 					}
 					try {
-						body();
+						body(); //执行定时器任务
 					} catch (...) {
 					}
 					std::lock_guard<std::mutex> lock(_mutex);
@@ -564,6 +565,7 @@ private:
 		}
 	}
 
+	/// 放入任务子函数, 将任务放入任务队列并唤醒事件循环
 	bool post_impl(task task_) {
 		if (!task_)
 			return false;
